@@ -23,6 +23,17 @@ This package contains the following:
 
 TODO: Figure out how to give instructions on how to install phoenix_ml and put them here.
 
+## Quick Start
+
+Included in this repository is a DC motor dataset for demonstration.
+
+Clone the repository and run the workflow:
+
+```bash
+git clone https://github.com/Ryan-907316/phoenix_ml.git
+cd phoenix_ml
+python _runner.py
+
 ## License
 
 This project is licensed under the MIT License - see the ([license](https://github.com/Ryan-907316/phoenix_ml/blob/main/LICENSE)) file for details.
