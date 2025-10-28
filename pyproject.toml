@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phoenix_ml"
+version = "1.0.0"
+authors = [
+    {name = "[Ryan Cheung]", email = "cheungkh@lancaster.ac.uk"}
+]
+description = "A workflow designed for Physics-Enhanced Machine Learning in engineering applications."
+readme = "README.md"
+requires-python = ">=3.12.6"
+license = "MIT"
+
+dependencies = [
+    "numpy >= 1.22",
+    "pandas >= 1.5",
+    "scipy >= 1.9",
+    "scikit-learn >= 1.2",
+    "matplotlib >= 3.6",
+    "seaborn >= 0.12",
+    "joblib >= 1.2",
+    "tqdm >= 4.65",
+    "tabulate >= 0.9",
+    "statsmodels >= 0.13",
+    "scikit-optimize >= 0.9",
+    "hyperopt >= 0.2",
+    "dcor >= 0.6",
+    "shap >= 0.41",
+    "reportlab >= 3.6",
+    "psutil >= 5.9",
+    "py-cpuinfo >= 9.0",
+    "xgboost >= 1.7",
+    "lightgbm >= 3.3",
+    "pywin32>=305; platform_system=='Windows'"
+]
+
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/Ryan-907316/phoenix_ml"
