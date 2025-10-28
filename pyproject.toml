@@ -1,9 +1,9 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=75.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "phoenix_ml"
+name = "phoenix_ml_workflow"
 version = "1.0.0"
 authors = [
     {name = "[Ryan Cheung]", email = "cheungkh@lancaster.ac.uk"}
@@ -11,10 +11,7 @@ authors = [
 description = "A workflow designed for Physics-Enhanced Machine Learning in engineering applications."
 readme = "README.md"
 requires-python = ">=3.12.6"
-license = { text = "MIT" }
-
-dynamic = []
-
+license = "MIT"
 
 dependencies = [
     "numpy >= 1.22",
@@ -44,8 +41,11 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Operating System :: OS Independent",
   "Intended Audience :: Science/Research",
-  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence"
 ]
 
 [project.urls]
 Homepage = "https://github.com/Ryan-907316/phoenix_ml"
+
+[tool.setuptools]
+license-files = []
