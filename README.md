@@ -21,7 +21,14 @@ This package contains the following:
 
 ## Installation
 
-TODO: Figure out how to give instructions on how to install phoenix_ml and put them here.
+You can install phoenix_ml directly from PyPI using the following link:
+[https://pypi.org/project/phoenix-ml-workflow/](https://pypi.org/project/phoenix-ml-workflow/)
+
+Or install it via pip:
+
+```bash
+pip install phoenix-ml-workflow
+```
 
 ## Quick Start
 
