@@ -1,13 +1,13 @@
 # phoenix_ml
 A Physics and Hybrid Optimised ENgine for Interpretability and eXplainability for Machine Learning. Intended to make the full machine learning workflow experience easier, from dataset to report.
 
-# overview
+# Overview
 
 This package intends to take you through the entire machine learning workflow with all the tools that you need in a single package. Preprocessing, model evaluation, interpretability, hyperparameter optimisation, postprocessing, uncertainty quantification, modelling with first-principles equations, residual learning, and report generation are all included without the additional importation of other packages, and has been made easy to use and highly customisible at every step of the workflow.
 
 This package is intended to be used with regression datasets that are clean, though future versions may extend this to classification problems as well as an in-house dataset cleaner.
 
-# features
+# Features
 
 This package contains the following:
 - **Physics modelling**: Physics-Enhanced Machine Learning (PEML) based methods such as residual learning, easy input of first-principles equations, and automatic generation of residual datasets.
