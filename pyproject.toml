@@ -1,39 +1,39 @@
 [build-system]
-requires = ["setuptools>=75.0", "wheel"]
+requires = ["setuptools>=75.0, <82", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "phoenix_ml_workflow"
-version = "1.0.0"
+version = "1.0.1"
 authors = [
     {name = "[Ryan Cheung]", email = "cheungkh@lancaster.ac.uk"}
 ]
 description = "A workflow designed for Physics-Enhanced Machine Learning in engineering applications."
 readme = "README.md"
 requires-python = ">=3.12.6"
-license = "MIT"
+license = { text = "MIT" }
 
 dependencies = [
-    "numpy >= 1.22",
-    "pandas >= 1.5",
-    "scipy >= 1.9",
-    "scikit-learn >= 1.2",
-    "matplotlib >= 3.6",
-    "seaborn >= 0.12",
-    "joblib >= 1.2",
-    "tqdm >= 4.65",
-    "tabulate >= 0.9",
-    "statsmodels >= 0.13",
-    "scikit-optimize >= 0.9",
-    "hyperopt >= 0.2",
-    "dcor >= 0.6",
-    "shap >= 0.41",
-    "reportlab >= 3.6",
-    "psutil >= 5.9",
-    "py-cpuinfo >= 9.0",
-    "xgboost >= 1.7",
-    "lightgbm >= 3.3",
-    "pywin32>=305; platform_system=='Windows'"
+    "numpy == 1.26.4",
+    "pandas == 2.2.3",
+    "scipy == 1.14.1",
+    "scikit-learn == 1.5.2",
+    "matplotlib == 3.9.2",
+    "seaborn == 0.13.2",
+    "joblib == 1.4.2",
+    "tqdm == 4.66.5",
+    "tabulate == 0.9.0",
+    "statsmodels == 0.14.4",
+    "scikit-optimize == 0.10.2",
+    "hyperopt == 0.2.7",
+    "dcor == 0.6",
+    "shap == 0.46.0",
+    "reportlab == 4.4.3",
+    "psutil == 6.1.0",
+    "py-cpuinfo == 9.0.0",
+    "xgboost == 2.1.2",
+    "lightgbm == 4.5.0",
+    "pywin32 == 308; platform_system=='Windows'"
 ]
 
 classifiers = [

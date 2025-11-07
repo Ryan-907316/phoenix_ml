@@ -82,22 +82,26 @@ def plot_ice_and_pdp(model, X_train, feature_names, target_var, model_name,
 def select_shap_explainer(model, X_train, background_sample_size, feature_names=None):
     """
     Pick an appropriate SHAP explainer based on model class.
-    Falls back to KernelExplainer with a small background sample.
+    Falls back to KernelExplainer with a small background sample if TreeExplainer fails.
 
     Implementation details:
     • TreeExplainer for tree-based models (fastest/common).
     • GradientExplainer for MLP (requires differentiability).
     • KernelExplainer otherwise (model-agnostic, slower).
-
-    We coerce X_train to a DataFrame (with column names) to keep SHAP happy.
     """
-    try:
-        # Always ensure DataFrame
-        if isinstance(X_train, np.ndarray):
-            if feature_names is None:
-                feature_names = [f"Feature_{i}" for i in range(X_train.shape[1])]
-            X_train = pd.DataFrame(X_train, columns=feature_names)
 
+    import shap
+    import numpy as np
+    import pandas as pd
+
+    # Always ensure DataFrame
+    if isinstance(X_train, np.ndarray):
+        if feature_names is None:
+            feature_names = [f"Feature_{i}" for i in range(X_train.shape[1])]
+        X_train = pd.DataFrame(X_train, columns=feature_names)
+
+    try:
+        # Preferred: TreeExplainer for tree-based models
         if isinstance(model, (RandomForestRegressor, XGBRegressor, BaggingRegressor, ExtraTreesRegressor)):
             return shap.TreeExplainer(model)
         elif isinstance(model, (MLPRegressor,)):
@@ -105,8 +109,16 @@ def select_shap_explainer(model, X_train, background_sample_size, feature_names=
         else:
             background = X_train.sample(n=min(background_sample_size, len(X_train)), replace=False)
             return shap.KernelExplainer(model.predict, background)
+
     except Exception as e:
-        raise ValueError(f"SHAP explainer error: {str(e)}")
+        # 🔄 Fallback logic for SHAP/XGBoost parsing bug
+        print(f"SHAP TreeExplainer failed ({e}). Falling back to KernelExplainer...")
+
+        try:
+            background = X_train.sample(n=min(background_sample_size, len(X_train)), replace=False)
+            return shap.KernelExplainer(model.predict, background)
+        except Exception as e2:
+            raise ValueError(f"SHAP explainer fallback error: {e2}")
 
 # SHAP summary (dot) plot showing feature importance and impact distribution.
 def plot_shap_summary(model, X_train, feature_names, background_sample_size, target_var, model_name):
