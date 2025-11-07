@@ -39,6 +39,7 @@ Clone the repository and run the workflow:
 ```bash
 git clone https://github.com/Ryan-907316/phoenix_ml.git
 cd phoenix_ml
+pip install setuptools wheel
 python _runner.py
 ```
 
