@@ -54,6 +54,11 @@ def run_workflow(
     output_dir: str,
     selected_models: list[str],
     targets: list[str],
+    
+    perform_hpo: bool = True,
+    perform_interpretability: bool = True,
+    perform_uq: bool = True,
+    perform_cv: bool = True,
 
     # Preprocessing
     test_size: float = 0.2,
@@ -123,49 +128,55 @@ def run_workflow(
     params  = {"default": default_params,  "random": {}, "hyperopt": {}, "skopt": {}}
 
     # UQ before HPO
-    uq_settings = uq_settings or dict(uq_method="Both", n_bootstrap=5, confidence_interval=95,
-                                      calibration_frac=0.05, subsample_test_size=50)
-    uq_df_before, uq_figures_before = run_uncertainty_quantification(
-        models_dict=selected,
-        X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
-        y_train=results["y_train"], y_test=results["y_test"],
-        target_columns=targets, model_names_to_run=selected_models,
-        stage_label="Before HPO", show_plots=True, **uq_settings
-    )
+    uq_df_before, uq_figures_before = None, None
+    if perform_uq:
+        uq_settings = uq_settings or dict(uq_method="Both", n_bootstrap=5, confidence_interval=95,
+                                        calibration_frac=0.05, subsample_test_size=50)
+        uq_df_before, uq_figures_before = run_uncertainty_quantification(
+            models_dict=selected,
+            X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
+            y_train=results["y_train"], y_test=results["y_test"],
+            target_columns=targets, model_names_to_run=selected_models,
+            stage_label="Before HPO", show_plots=True, **uq_settings
+        )
 
     # Interpretability
-    interpretability_settings = interpretability_settings or dict(
-        preferred_model_name="XGBoost Regressor",
-        test_sample_size=1000, background_sample_size=10,
-        subsample=250, grid_resolution=10
-    )
-    interpretability_figures = run_interpretability_analysis(
-        models_dict=selected,
-        X_train=results["X_train_scaled"], y_train=results["y_train"],
-        target_columns=results["target_columns"], feature_names=results["feature_names"],
-        **interpretability_settings, show_plots=True
-    )
+    interpretability_figures = None
+    if perform_interpretability:
+        interpretability_settings = interpretability_settings or dict(
+            preferred_model_name="XGBoost Regressor",
+            test_sample_size=1000, background_sample_size=10,
+            subsample=250, grid_resolution=10
+        )
+        interpretability_figures = run_interpretability_analysis(
+            models_dict=selected,
+            X_train=results["X_train_scaled"], y_train=results["y_train"],
+            target_columns=results["target_columns"], feature_names=results["feature_names"],
+            **interpretability_settings, show_plots=True
+        )
 
     # HPO
-    hpo_metrics, hpo_params, hpo_times, hpo_plots = run_all_models_optimisation(
-        models_dict=selected,
-        selected_model_names=selected_models,
-        X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
-        y_train=results["y_train"], y_test=results["y_test"],
-        target_columns=targets,
-        methods_to_run=list(methods_to_run),
-        metric=hpo_metric,
-        sampling_method=sampling_method,
-        sample_size=sample_size,
-        n_iter=n_iter,
-        evals=evals,
-        calls=calls,
-        n_jobs=n_jobs,
-        plot=True,
-        output_dir=images_dir,
-    )
-    metrics.update(hpo_metrics)
-    params.update(hpo_params)
+    hpo_metrics, hpo_params, hpo_times, hpo_plots = {}, {}, {}, {}
+    if perform_hpo:
+        hpo_metrics, hpo_params, hpo_times, hpo_plots = run_all_models_optimisation(
+            models_dict=selected,
+            selected_model_names=selected_models,
+            X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
+            y_train=results["y_train"], y_test=results["y_test"],
+            target_columns=targets,
+            methods_to_run=list(methods_to_run),
+            metric=hpo_metric,
+            sampling_method=sampling_method,
+            sample_size=sample_size,
+            n_iter=n_iter,
+            evals=evals,
+            calls=calls,
+            n_jobs=n_jobs,
+            plot=True,
+            output_dir=images_dir,
+        )
+        metrics.update(hpo_metrics)
+        params.update(hpo_params)
 
     # Collect and choose best
     collected_results_df = collect_results_as_dataframe(
@@ -180,27 +191,31 @@ def run_workflow(
     collected_results_df.to_csv(csv_path, index=False)
     best_models_per_target = find_best_model_and_hyperparams(collected_results_df, metric=hpo_metric)
 
-    # Postprocessing (CV, residuals, transforms) 
-    cv_args = cv_args or {"n_splits": 10, "test_size": 0.2, "random_state": 0}
-    post_results = run_postprocessing_analysis(
-        best_models=best_models_per_target,
-        X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
-        y_train=results["y_train"], y_test=results["y_test"],
-        cv_method=cv_method, cv_args=cv_args, scoring_metric=scoring_metric,
-        show_cv_summary=True, show_cooks_distance=True, show_residuals=True,
-        show_transformation_plots=True, image_output_dir=images_dir
-    )
+    # Postprocessing (CV, residuals, transforms)
+    post_results = None
+    if perform_cv:
+        cv_args = cv_args or {"n_splits": 10, "test_size": 0.2, "random_state": 0}
+        post_results = run_postprocessing_analysis(
+            best_models=best_models_per_target,
+            X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
+            y_train=results["y_train"], y_test=results["y_test"],
+            cv_method=cv_method, cv_args=cv_args, scoring_metric=scoring_metric,
+            show_cv_summary=True, show_cooks_distance=True, show_residuals=True,
+            show_transformation_plots=True, image_output_dir=images_dir
+        )
 
     # UQ after HPO
-    best_model_instances = get_best_models_by_method_across_targets(
-        selected_models, targets, metrics, params, hpo_metric, selected
-    )
-    uq_df_after, uq_figures_after = run_uncertainty_quantification(
-        models_dict=best_model_instances,
-        X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
-        y_train=results["y_train"], y_test=results["y_test"],
-        target_columns=targets, model_names_to_run=selected_models,
-        stage_label="After HPO", show_plots=True, **uq_settings
+    uq_df_after, uq_figures_after = None, None
+    if perform_uq:
+        best_model_instances = get_best_models_by_method_across_targets(
+            selected_models, targets, metrics, params, hpo_metric, selected
+        )
+        uq_df_after, uq_figures_after = run_uncertainty_quantification(
+            models_dict=best_model_instances,
+            X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
+            y_train=results["y_train"], y_test=results["y_test"],
+            target_columns=targets, model_names_to_run=selected_models,
+            stage_label="After HPO", show_plots=True, **uq_settings
     )
 
     # Persist best models
@@ -239,21 +254,29 @@ def run_workflow(
     add_system_info_to_pdf(elements, styles)
     plot_paths = save_preprocessing_plots(results, output_dir=images_dir)
     add_preprocessing_section(elements, results, plot_paths, dataset_path, styles)
+    interpretability_settings = interpretability_settings or {}
     add_model_selection_section(
-        elements, styles,
-        selected_model_names=selected_models,
-        preferred_model_name=interpretability_settings["preferred_model_name"]
+    elements, styles,
+    selected_model_names=selected_models,
+    preferred_model_name=interpretability_settings.get("preferred_model_name", "N/A")
     )
     add_model_training_table_to_report(elements, results_df, styles)
-    handle_uq_reporting_section(uq_df_before, uq_figures_before, "Before HPO", elements, styles, images_dir, report_dir, uq_settings=uq_settings)
-    add_interpretability_section(elements, interpretability_figures, styles, images_dir, interpretability_settings)
-    add_hpo_summary_section(
-        elements, styles, hpo_metrics, hpo_params, hpo_times, hpo_plots,
-        list(methods_to_run), hpo_metric, sampling_method, sample_size, n_iter, evals, calls, n_jobs,
-        csv_path, best_models_per_target, output_dir=images_dir
-    )
-    add_postprocessing_section(elements, styles, postprocessing_results=post_results, image_output_dir=images_dir)
-    handle_uq_reporting_section(uq_df_after, uq_figures_after, "After HPO", elements, styles, images_dir, report_dir, uq_settings=uq_settings)
+    if perform_uq and uq_df_before is not None:
+        handle_uq_reporting_section(uq_df_before, uq_figures_before, "Before HPO", elements, styles, images_dir, report_dir, uq_settings=uq_settings)
+
+    if perform_interpretability and interpretability_figures is not None:
+        add_interpretability_section(elements, interpretability_figures, styles, images_dir, interpretability_settings)
+
+    if perform_hpo:
+        add_hpo_summary_section(
+            elements, styles, hpo_metrics, hpo_params, hpo_times, hpo_plots,
+            list(methods_to_run), hpo_metric, sampling_method, sample_size, n_iter, evals, calls, n_jobs,
+            csv_path, best_models_per_target, output_dir=images_dir
+        )
+    if perform_cv and post_results is not None:
+        add_postprocessing_section(elements, styles, postprocessing_results=post_results, image_output_dir=images_dir)
+    if perform_uq and uq_df_after is not None:
+        handle_uq_reporting_section(uq_df_after, uq_figures_after, "After HPO", elements, styles, images_dir, report_dir, uq_settings=uq_settings)
 
     elapsed = time.time() - start_time
     hhmmss = f"{elapsed//3600:02.0f}:{(elapsed%3600)//60:02.0f}:{elapsed%60:05.2f}"

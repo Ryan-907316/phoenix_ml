@@ -115,8 +115,15 @@ def main():
         split_method=SPLIT_METHOD,
         show_preproc_plots=SHOW_PREPROC_PLOTS,
 
+        # Option to skip advanced modules. Change these to "False" anytime you want to skip, no need to change anything else.
+        perform_interpretability=True,
+        perform_uq=True,
+        perform_hpo=True,
+        perform_cv=True,
+
         # Interpretability
         interpretability_settings=INTERP_SETTINGS,
+        
 
         # HPO
         hpo_metric=args.metric,
@@ -130,7 +137,7 @@ def main():
 
         # UQ
         uq_settings=UQ_SETTINGS,
-
+        
         # CV / postprocessing
         cv_method=CV_METHOD,
         cv_args=CV_ARGS,
