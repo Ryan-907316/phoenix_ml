@@ -83,7 +83,7 @@ results = run_workflow(
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](https://github.com/Ryan-907316/phoenix_ml/blob/main/LICENSE) file for details.
+This project is licensed under the MIT License: see the [LICENSE](https://github.com/Ryan-907316/phoenix_ml/blob/main/LICENSE) file for details.
 
 ## Credits
 
