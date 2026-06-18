@@ -10,6 +10,7 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt
 import shap
+from tqdm import tqdm
 from sklearn.inspection import PartialDependenceDisplay
 from sklearn.ensemble import RandomForestRegressor, BaggingRegressor, ExtraTreesRegressor
 from sklearn.neural_network import MLPRegressor
@@ -42,41 +43,60 @@ def get_fastest_model(models_dict, X_train, y_train, target_var, sample_size=100
     print(f"Fastest model selected: {fastest_model} ({min_time:.4f}s)")
     return fastest_model
 
+# Max subplot rows per figure — keeps each figure within one A4 content-height page.
+# ICE/PDP and SHAP Dependence use 12"-wide 2-col layouts with 4.5" rows.
+# 3 rows × 4.5" = 13.5" figure height → ~542pt display — safely under the 652pt page limit.
+_MAX_ROWS_PER_FIG = 3
+
 # ICE and PDP
-# Plot ICE + PDP for every feature
+# Plot ICE + PDP for every feature, split across multiple figures so each fits on one PDF page.
 def plot_ice_and_pdp(model, X_train, feature_names, target_var, model_name,
                      subsample=250, grid_resolution=20):
     num_features = len(feature_names)
-    num_cols = 3
-    num_rows = (num_features + num_cols - 1) // num_cols
+    num_cols = min(num_features, 2)
+    subplot_w, subplot_h = 6.0, 4.5
+    features_per_fig = _MAX_ROWS_PER_FIG * num_cols
 
-    fig, axes = plt.subplots(num_rows, num_cols, figsize=(15, 5 * num_rows))
-    axes = axes.flatten()
+    chunks = [list(range(i, min(i + features_per_fig, num_features)))
+              for i in range(0, num_features, features_per_fig)]
+    n_parts = len(chunks)
+    figs = []
 
-    for i, feature_idx in enumerate(range(num_features)):
-        ax = axes[i]
-        display = PartialDependenceDisplay.from_estimator(
-            model,
-            X_train,
-            [feature_idx],
-            feature_names=feature_names,
-            kind="both",
-            subsample=subsample,
-            grid_resolution=grid_resolution,
-            percentiles=(0.1, 0.9),
-            ax=ax,
+    for part_idx, chunk in enumerate(chunks):
+        chunk_n = len(chunk)
+        num_rows = (chunk_n + num_cols - 1) // num_cols
+
+        fig, axes = plt.subplots(
+            num_rows, num_cols,
+            figsize=(num_cols * subplot_w, num_rows * subplot_h),
+            squeeze=False,
         )
-        ax.set_title(f"Feature: {feature_names[feature_idx]}")
-        ax.set_xlabel(f"{feature_names[feature_idx]}")
-        ax.set_ylabel(f"{target_var}")
+        axes_flat = axes.flatten()
 
-    for j in range(i + 1, len(axes)):
-        fig.delaxes(axes[j])
+        for i, feature_idx in enumerate(chunk):
+            ax = axes_flat[i]
+            PartialDependenceDisplay.from_estimator(
+                model, X_train, [feature_idx],
+                feature_names=feature_names,
+                kind="both", subsample=subsample,
+                grid_resolution=grid_resolution,
+                percentiles=(0.1, 0.9), ax=ax,
+            )
+            ax.set_title(f"Feature: {feature_names[feature_idx]}", fontsize=11)
+            ax.set_xlabel(feature_names[feature_idx], fontsize=10)
+            ax.set_ylabel(target_var, fontsize=10)
+            ax.tick_params(labelsize=9)
 
-    fig.suptitle(f"ICE and PDP Plots for Target: {target_var} ({model_name})", fontsize=16)
-    fig.subplots_adjust(top=0.92)  # Adjust spacing to make room for the suptitle
-    plt.close(fig)
-    return fig
+        for j in range(i + 1, len(axes_flat)):
+            fig.delaxes(axes_flat[j])
+
+        part_label = f" (Part {part_idx + 1} of {n_parts})" if n_parts > 1 else ""
+        fig.suptitle(f"ICE and PDP Plots for Target: {target_var} ({model_name}){part_label}", fontsize=14)
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.close(fig)
+        figs.append(fig)
+
+    return figs
 
 # SHAP Explainer Selection
 def select_shap_explainer(model, X_train, background_sample_size, feature_names=None):
@@ -138,7 +158,7 @@ def plot_shap_summary(model, X_train, feature_names, background_sample_size, tar
     plt.close(fig)
     return fig
 
-# SHAP Dependence
+# SHAP Dependence — split across multiple figures so each fits on one PDF page.
 def plot_shap_dependence(model, X_train, feature_names, background_sample_size, target_var, model_name):
     explainer = select_shap_explainer(model, X_train, background_sample_size, feature_names)
     shap_values = explainer.shap_values(X_train)
@@ -147,38 +167,51 @@ def plot_shap_dependence(model, X_train, feature_names, background_sample_size, 
         X_train = pd.DataFrame(X_train, columns=feature_names)
 
     num_features = len(feature_names)
-    num_cols = 3
-    num_rows = (num_features + num_cols - 1) // num_cols
+    num_cols = min(num_features, 2)
+    subplot_w, subplot_h = 6.0, 4.5
+    features_per_fig = _MAX_ROWS_PER_FIG * num_cols
 
-    fig, axes = plt.subplots(num_rows, num_cols, figsize=(15, 5 * num_rows))
-    axes = axes.flatten()
-
-    # Normalise across entire matrix for consistent colormap scaling
     norm = plt.Normalize(vmin=X_train.min().min(), vmax=X_train.max().max())
     cmap = plt.cm.coolwarm
 
-    for i, feature_idx in enumerate(range(num_features)):
-        ax = axes[i]
-        shap.dependence_plot(
-            feature_idx,
-            shap_values,
-            X_train,
-            feature_names=feature_names,
-            ax=ax,
-            show=False,
-            color=cmap(norm(X_train.iloc[:, feature_idx])),
+    chunks = [list(range(i, min(i + features_per_fig, num_features)))
+              for i in range(0, num_features, features_per_fig)]
+    n_parts = len(chunks)
+    figs = []
+
+    for part_idx, chunk in enumerate(chunks):
+        chunk_n = len(chunk)
+        num_rows = (chunk_n + num_cols - 1) // num_cols
+
+        fig, axes = plt.subplots(
+            num_rows, num_cols,
+            figsize=(num_cols * subplot_w, num_rows * subplot_h),
+            squeeze=False,
         )
-        ax.set_title(f"SHAP Dependence: {feature_names[feature_idx]}")
-        ax.set_xlabel(f"{feature_names[feature_idx]}")
-        ax.set_ylabel(f"SHAP value ({target_var})")
+        axes_flat = axes.flatten()
 
-    for j in range(i + 1, len(axes)):
-        fig.delaxes(axes[j])
+        for i, feature_idx in enumerate(chunk):
+            ax = axes_flat[i]
+            shap.dependence_plot(
+                feature_idx, shap_values, X_train,
+                feature_names=feature_names, ax=ax, show=False,
+                color=cmap(norm(X_train.iloc[:, feature_idx])),
+            )
+            ax.set_title(f"SHAP Dependence: {feature_names[feature_idx]}", fontsize=11)
+            ax.set_xlabel(feature_names[feature_idx], fontsize=10)
+            ax.set_ylabel(f"SHAP value ({target_var})", fontsize=10)
+            ax.tick_params(labelsize=9)
 
-    fig.suptitle(f"SHAP Dependence Plots for Target: {target_var} ({model_name})", fontsize=16)
-    fig.subplots_adjust(top=0.92)
-    plt.close(fig)
-    return fig
+        for j in range(i + 1, len(axes_flat)):
+            fig.delaxes(axes_flat[j])
+
+        part_label = f" (Part {part_idx + 1} of {n_parts})" if n_parts > 1 else ""
+        fig.suptitle(f"SHAP Dependence Plots for Target: {target_var} ({model_name}){part_label}", fontsize=14)
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.close(fig)
+        figs.append(fig)
+
+    return figs
 
 # Run All Interpretability Plots
 def run_interpretability_analysis(
@@ -216,24 +249,24 @@ def run_interpretability_analysis(
     X_sampled = X_train[:test_sample_size]
     y_sampled = y_train.iloc[:test_sample_size]
 
-    print(f"\nRunning Interpretability Analysis for: {model_name}")
+    tqdm.write(f"\n  Running Interpretability Analysis for: {model_name}")
     figures = {}
 
-    for target_var in target_columns:
-        print(f"\nTarget: {target_var}")
+    for target_var in tqdm(target_columns, desc=f"Interpretability ({model_name})", unit="target", leave=False):
+        tqdm.write(f"  Target: {target_var}")
         model.fit(X_sampled, y_sampled[target_var])
 
         if show_plots:
-            print("Plotting ICE + PDP...")
+            tqdm.write("  Plotting ICE + PDP...")
             fig1 = plot_ice_and_pdp(model, X_sampled, feature_names, target_var, model_name,
                                     subsample=subsample, grid_resolution=grid_resolution)
             figures[f"ICE_PDP_{target_var}"] = fig1
 
-            print("Plotting SHAP Summary...")
+            tqdm.write("  Plotting SHAP Summary...")
             fig2 = plot_shap_summary(model, X_sampled, feature_names, background_sample_size, target_var, model_name)
             figures[f"SHAP_Summary_{target_var}"] = fig2
 
-            print("Plotting SHAP Dependence...")
+            tqdm.write("  Plotting SHAP Dependence...")
             fig3 = plot_shap_dependence(model, X_sampled, feature_names, background_sample_size, target_var, model_name)
             figures[f"SHAP_Dependence_{target_var}"] = fig3
 

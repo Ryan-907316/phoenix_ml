@@ -6,6 +6,7 @@ import time
 import numpy as np
 import pandas as pd
 from tabulate import tabulate
+from tqdm import tqdm
 
 from sklearn.svm import SVR
 from sklearn.ensemble import (
@@ -84,8 +85,16 @@ def train_and_evaluate_model(model, X_train, X_test, y_train, y_test, target_var
 
     # For Adjusted R^2 we need n (rows) and p (features)
     n, p = X_test.shape
-    if n <= 1 or p < 1:
-        raise ValueError(f"Invalid dimensions for Adjusted R^2: n={n}, p={p}.")
+    if n <= 1 or n <= p + 1:
+        # Too few test samples to compute Adjusted R² reliably — return NaN for that metric
+        metrics_results = {}
+        for metric_name, metric_func in selected_metrics.items():
+            if metric_name == "ADJUSTED R^2":
+                metrics_results[metric_name] = float("nan")
+            else:
+                metrics_results[metric_name] = metric_func(y_test[target_var], y_pred)
+        metrics_results["Time Elapsed (s)"] = time.time() - start_time
+        return metrics_results
 
     metrics_results = {
         metric_name: (
@@ -112,8 +121,8 @@ def run_models(
     default_params = {}
     model_results_dict = {}
 
-    for model_name in selected_model_names:
-        print(f"Training {model_name}...")
+    for model_name in tqdm(selected_model_names, desc="Training models", unit="model", leave=False):
+        tqdm.write(f"  Training {model_name}...")
         override_params = custom_hyperparams.get(model_name, {}) if custom_hyperparams else None
         model = reset_model_to_defaults(model_name, override_params)
 

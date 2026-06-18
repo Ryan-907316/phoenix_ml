@@ -3,69 +3,92 @@ A **P**hysics and **H**ybrid **O**ptimised **EN**gine for **I**nterpretability a
 
 # Overview
 
-This package intends to take you through the entire machine learning workflow with all the tools that you need in a single package. Preprocessing, model evaluation, interpretability, hyperparameter optimisation, postprocessing, uncertainty quantification, modelling with first-principles equations, residual learning, and report generation are all included without the additional importation of other packages, and has been made easy to use and highly customisible at every step of the workflow.
+This package takes you through the entire machine learning workflow with all the tools you need in a single package. Dataset cleaning, preprocessing, model evaluation, interpretability, hyperparameter optimisation, postprocessing, uncertainty quantification, physics-based modelling, residual learning, and report generation are all included, with no additional imports required. The interface is designed to be easy to use and highly customisable at every step of the workflow.
 
-This package is intended to be used with regression datasets that are clean, though future versions may extend this to classification problems as well as an in-house dataset cleaner.
+The package is primarily aimed at regression problems in engineering and scientific applications, with built-in support for Physics-Enhanced Machine Learning (PEML) methods.
 
 # Features
 
 This package contains the following:
-- **Physics modelling**: Physics-Enhanced Machine Learning (PEML) based methods such as residual learning, easy input of first-principles equations, and automatic generation of residual datasets.
-- **Preprocessing**: Customisable test/train options, scatter plots of features and target variables, highly detailed boxplots of features, and distance correlation matrix with toggleable dummy variable.
-- **Model training and evaluation**: The ability to add, change, or remove regression models when training, compatibility with single and multivariable optimisation, evaluation summarised as neat tables with different evaluation metrics.
-- **Interpretability**: Partial Dependence Plots (PDPs) with Individual Condition Expectations (ICE), with the inclusion of Shapley Additive eXplanation (SHAP) summaries and plots. Automatic evaluation of preferred model based on model training performance used in interpretability.
-- **Hyperparameter Optimisation (HPO)**: Inclusion of random HPO (with the choice of random sampling included, choose from Monte Carlo, Sobol, Halton, or Latin Hypercube sampling), Hyperopt (Adaptive Tree-based Parzen Estimators) and scikit-optimize (Gaussian Process Minimisation). Customise which method(s) to use and compare, as well as the number of iterations for all, and the number of CPU cores for HPO. Displays the best performing model for each target variable according to the user-defined metric (MSE, $R^2$, Adjusted $R^2$, or $Q^2$) and the time elapsed for each.
-- **Postprocessing**: Variety of cross-validation methods with full customisation of arguments and scoring metrics. Influential points determination using Cook's Distance, residual analysis and automatic determination of transformed residuals using Anderson-Darling normality test, and Q-Q plots.
-- **Uncertainty Quantification (UQ)**: Use of bootstrapping and conformal predictions as well as a user-customisable confidence and prediction interval. Ability to perform UQ before and/or after HPO for comparison.
-- **Report generation**: Summarise all findings in a single .pdf file with the above features, with high quality images included in the report and additionally in a separate images folder for further analysis. Useful information is summarised in neat tables and .csv files. Models are saved as .pkl files overall and for each target variable. .json files included for full reproducibility.
+- **Dataset Cleaning**: Interactive column role assignment with automatic type detection. Sensor fault detection covering stuck values, clipping, and burst dropout. Configurable outlier detection (IQR, Z-score, or percentile-based) with multiple handling strategies, missing value imputation, and duplicate removal.
+- **Physics modelling**: Physics-Enhanced Machine Learning (PEML) methods including residual learning, safe input of first-principles expressions, script-based physics models, and automatic generation of residual datasets. Supports both expression mode and script mode.
+- **Preprocessing**: Customisable test/train split options (random, first-N, last-N). Scatter plots of features against target variables, highly detailed boxplots, and a distance correlation matrix with a toggleable dummy variable and optional Marchenko-Pastur denoising.
+- **Model training and evaluation**: Support for ten regression models with the ability to add, change, or remove them. Compatible with single and multi-target optimisation. Results summarised as tables with MSE, R², Adjusted R², and Q² metrics.
+- **Interpretability**: Partial Dependence Plots (PDPs) with Individual Conditional Expectations (ICE), SHAP summary plots, and SHAP dependence plots. Automatic selection of the preferred model for interpretability based on training performance.
+- **Hyperparameter Optimisation (HPO)**: Random search (with Monte Carlo, Sobol, Halton, or Latin Hypercube sampling), Hyperopt (Tree-structured Parzen Estimator), and scikit-optimize (Gaussian Process Minimisation). Configurable number of iterations, CPU cores, and early stopping. Best model per target variable is selected by a user-defined metric (MSE, R², Adjusted R², or Q²).
+- **Pareto front analysis**: Performance vs. training-time trade-off charts with non-dominated solution filtering, automatic log-scaling, and a numbered model legend.
+- **Postprocessing**: Multiple cross-validation methods (K-Fold, Repeated K-Fold, LOO, LpO, Shuffle Split) with full argument and scoring metric customisation. Cook's Distance for influential point identification. Residual analysis including scatter, histogram, Q-Q plots, and automatic best-transform selection via the Anderson-Darling statistic.
+- **Uncertainty Quantification (UQ)**: Bootstrap and conformal prediction intervals with a user-configurable confidence level. Ground truth overlaid on interval plots for direct visual comparison. Run before and/or after HPO to compare the effect of tuning.
+- **Report generation**: All findings compiled into a single PDF with full-resolution images also saved separately. Results tables, HPO CSV outputs, model pipelines saved as .pkl files, and a .json metadata file for full reproducibility.
 
 ## Installation
 
-You can install phoenix_ml directly from PyPI using the following link:
-[https://pypi.org/project/phoenix-ml-workflow/](https://pypi.org/project/phoenix-ml-workflow/)
+### From PyPI
 
-Or install it via pip:
+Available on [PyPI](https://pypi.org/project/phoenix-ml-workflow/).
 
 ```bash
 pip install phoenix-ml-workflow
 ```
 
-## Quick Start
+Then launch the interface with:
 
-Included in this repository is a DC motor dataset for demonstration.
+```bash
+phoenix-ml
+```
 
-Clone the repository and run the workflow:
+### From GitHub (to explore or modify the source)
 
 ```bash
 git clone https://github.com/Ryan-907316/phoenix_ml.git
 cd phoenix_ml
-pip install setuptools wheel
-python _runner.py
+pip install .
 ```
 
-## TODO and Future Work
+Then run:
 
-The next version of phoenix_ml (likely v1.1) plans to include several of the following improvements and new features. Here's a preview of what I have in mind:
+```bash
+python app.py
+```
 
-- User documentation and proper instructions on how to use this package effectively. It will cover machine learning concepts such as explaining how hyperparameter optimisation works, the need for interpretability tools and how to use them, but also how to maximise the usability of this workflow so that almost anyone with an interest can use this.
-- Improved image formatting in the generated reports, including better handling of datasets that contain a large number of features and target variables (as right now, they may appear a bit squished/have overlapping text etc)
-- Integration of ground truth overlaid in uncertainty quantification plots, giving a better visual indication of the coverage within confidence and/or prediction intervals.
-- Addition of Pareto Front analysis for performance-efficency trade offs in model selection, which includes dominance filtering and identification of optimal trade-offs.
-- An optional Marchenko-Pastur thresholding as an addition to the dummy variable for improved distance correlation estimation.
-- Expansion of PEML capabilities to more than just residual learning- the plan is to possibly integrate neural network models to support the inclusion of Physics-Informed Neural Networks (PINNs) in the long term, but also other non-NN physics-enhanced methods too, such as hybrid physics-data modelling.
-- Development of an in-house dataset cleaning utility script to deal with incomplete and weird data, ways to deal with NaNs, floating point oddities, outliers, spikes, time drifts, ect. Probably will include some filtering like simple/exponential weighted average filters, Savitzky-Golay filters etc. Plan is to make everything user-defined and customisable too.
--  Potential extension to classification problems as well as combining regression and classification methods together (but this I know will take a lot of work, especially getting it to work seamlessly)
--  Ongoing bug fixes and QoL improvements, and also any feedback given from v1.0.
+The terminal will display your system information on startup. Press any key to open the graphical interface, where you can configure and run the full workflow without writing any code.
+
+To generate the example DC motor dataset, run:
+
+```bash
+python examples/DC_Motors_Dataset_Generation.py
+```
+
+### Programmatic use
+
+The full workflow can also be called directly from Python, for example:
+
+```python
+from phoenix_ml import run_workflow
+
+results = run_workflow(
+    dataset_path="examples/Original Datasets/DC_Motor_Dataset.csv",
+    output_dir="Results/",
+    selected_models=["XGBoost Regressor", "Random Forest Regressor"],
+    targets=["Motor Speed", "Armature Current"],
+)
+```
+
+## Future Work
+
+- **User documentation**: Proper guides covering machine learning concepts (HPO, interpretability, UQ) and how to get the most out of each step of the workflow.
+- **Extended PEML**: Physics-Informed Neural Networks (PINNs) and other non-residual physics-enhanced methods.
+- **Classification support**: Extending the workflow beyond regression problems.
+- Ongoing bug fixes and quality-of-life improvements based on user feedback.
 
 ## License
 
-This project is licensed under the MIT License - see the [license](https://github.com/Ryan-907316/phoenix_ml/blob/main/LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](https://github.com/Ryan-907316/phoenix_ml/blob/main/LICENSE) file for details.
 
 ## Credits
 
-Package created by Ryan Cheung, and extends the work done previously for an individual undergraduate project.
+Package created by Ryan Cheung.
 
 ## Contact
 
-University email is cheungkh@lancaster.ac.uk for queries, instructions, or more information.
-
+University email: cheungkh@lancaster.ac.uk

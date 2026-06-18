@@ -26,6 +26,7 @@ from phoenix_ml.model_training import metrics_dict
 
 import os
 import warnings
+import contextlib
 from sklearn.exceptions import ConvergenceWarning
 
 # Suppress logs
@@ -35,6 +36,22 @@ os.environ['XGBOOST_VERBOSITY'] = '0'
 # Suppress general Python warnings from skopt and others
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
+
+@contextlib.contextmanager
+def _tqdm_joblib(tqdm_object):
+    """Patch joblib so parallel batch completions update a tqdm bar."""
+    import joblib
+    class _Callback(joblib.parallel.BatchCompletionCallBack):
+        def __call__(self, *args, **kwargs):
+            tqdm_object.update(n=self.batch_size)
+            return super().__call__(*args, **kwargs)
+    old = joblib.parallel.BatchCompletionCallBack
+    joblib.parallel.BatchCompletionCallBack = _Callback
+    try:
+        yield tqdm_object
+    finally:
+        joblib.parallel.BatchCompletionCallBack = old
+        tqdm_object.close()
 
 def format_elapsed_time(seconds):
     minutes = int(seconds) // 60
@@ -57,8 +74,19 @@ def _compute_metric(y_true, y_pred, metric_name, n=None, p=None):
     else:
         raise ValueError(f"Unsupported metric: {metric_name}")
 
+def _cast_params(params: dict, model_name: str) -> dict:
+    """Cast HPO-sampled values to types expected by sklearn/xgboost/lgbm."""
+    result = params.copy()
+    for key, value in params.items():
+        if key == "hidden_layer_sizes":
+            result[key] = (int(value),) if not isinstance(value, tuple) else value
+        elif key in param_spaces.get(model_name, {}) and param_spaces[model_name][key]["type"] == "int":
+            result[key] = int(value)
+    return result
+
 def run_random_search(
-    model, param_space, X_train, X_test, y_train, y_test, sample_size, n_iter, n_jobs, target_var, metric, sampling_method
+    model, param_space, X_train, X_test, y_train, y_test, sample_size, n_iter, n_jobs, target_var, metric, sampling_method,
+    patience=None, min_delta=1e-4, model_name=""
 ):
     # 1) Build a low-discrepancy sampler (Sobol/Halton/LHS) or PRNG ("Random").
     # 2) Map samples in [0,1]^d onto each hyperparameter's domain:
@@ -67,8 +95,8 @@ def run_random_search(
     #    - "choice": index into options
     #    - special-case "hidden_layer_sizes": produce (units,) tuple for MLP
     # 3) (Optional) Subsample training set for speed on large data.
-    # 4) Fit/evaluate each config in parallel (joblib.Parallel).
-    # 5) Return a DataFrame of all trials + the best row and runtime.
+    # 4) Fit/evaluate each config; parallel when ES is off, sequential when ES is on.
+    # 5) Return a DataFrame of all trials + the best row, runtime, and early-stopping info.
     start_time = time.time()
     def generate_param_samples(param_space, sampler):
         param_samples = {}
@@ -83,14 +111,12 @@ def run_random_search(
             elif bounds["type"] == "int":
                 low, high = bounds["bounds"]
                 vals = np.round(low + (high - low) * sampler[:, i]).astype(int)
-                param_samples[param] = vals
-            elif param == "hidden_layer_sizes":
-                low, high = bounds["bounds"]
-                layer_size = np.round(low + (high - low) * sampler[:, i]).astype(int)
-                # one tuple per iteration
-                param_samples[param] = [(int(ls),) for ls in layer_size]
+                if param == "hidden_layer_sizes":
+                    param_samples[param] = [(int(v),) for v in vals]
+                else:
+                    param_samples[param] = vals
         return param_samples
-    
+
     # Generate parameter samples
     # Map a unit hypercube sample matrix 'sampler' -> dict[param] -> list of typed values.
     # Keep lengths aligned so we can zip into a list of param dicts.
@@ -125,12 +151,41 @@ def run_random_search(
         y_pred = model.predict(X_test)
         n, p = X_test.shape
         metric_value = _compute_metric(y_test[target_var], y_pred, metric, n, p)
-        return params, metric_value  # ← add this
+        return params, metric_value
 
-    # Parallelise evaluations
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(evaluate)(params) for params in param_combinations
-    )
+    # Run evaluations: sequential with early stopping, or parallel without
+    is_minimised = metric in ("MSE", "MAE")
+
+    if patience is not None:
+        best_es_score = np.inf if is_minimised else -np.inf
+        no_improve_count = 0
+        actual_iters = 0
+        results = []
+        desc = f"Random Search [{model_name}] {target_var}"
+        with tqdm(total=n_iter, desc=desc, unit="config", leave=False) as pbar:
+            for params in param_combinations:
+                params_out, metric_value = evaluate(params)
+                results.append((params_out, metric_value))
+                actual_iters += 1
+                pbar.update(1)
+                improved = (metric_value < best_es_score - min_delta) if is_minimised else (metric_value > best_es_score + min_delta)
+                if improved:
+                    best_es_score = metric_value
+                    no_improve_count = 0
+                else:
+                    no_improve_count += 1
+                if no_improve_count >= patience:
+                    tqdm.write(f"  Early stopping at {actual_iters}/{n_iter} iterations (no {metric} improvement > {min_delta} for {patience} steps)")
+                    break
+        stopped_early = actual_iters < n_iter
+    else:
+        desc = f"Random Search [{model_name}] {target_var}"
+        with _tqdm_joblib(tqdm(total=n_iter, desc=desc, unit="config", leave=False)):
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(evaluate)(params) for params in param_combinations
+            )
+        actual_iters = n_iter
+        stopped_early = False
 
     # Compile results into a DataFrame
     metric_name = metric.upper()
@@ -151,17 +206,32 @@ def run_random_search(
     elapsed_time = time.time() - start_time
     print(f"Random Search completed in: {format_elapsed_time(elapsed_time)}")
 
-    return results_df, best_params, best_metric_value, elapsed_time
+    es_info = {
+        "stopped_early": stopped_early,
+        "actual_iters": actual_iters,
+        "max_iters": n_iter,
+        "patience": patience,
+        "min_delta": min_delta,
+    }
+    return results_df, best_params, best_metric_value, elapsed_time, es_info
 
 
-def plot_random_search_results(results_by_target, param_space, model_name, metric, sampling_method):
+def plot_random_search_results(results_by_target, param_space, model_name, metric, sampling_method, es_info_by_target=None):
     metric_column = metric.upper()
     num_targets = len(results_by_target)
     num_params = len(param_space)
 
+    # Build early-stopping annotation for the suptitle
+    es_info_by_target = es_info_by_target or {}
+    es_notes = []
+    for tv, es in es_info_by_target.items():
+        if es.get("stopped_early"):
+            es_notes.append(f"{tv}: {es['actual_iters']}/{es['max_iters']} iters")
+    es_suffix = f"\nEarly Stopped — {', '.join(es_notes)}" if es_notes else ""
+
     # Create subplots for each target variable
     fig, axes = plt.subplots(num_targets, num_params, figsize=(5 * num_params, 4 * num_targets), sharey=True)
-    fig.suptitle(f"Random Search ({sampling_method}) Results for {model_name} - {metric_column} ", fontsize=16)
+    fig.suptitle(f"Random Search ({sampling_method}) Results for {model_name} - {metric_column}{es_suffix}", fontsize=16)
 
     if num_targets == 1:
         axes = [axes]  # Make sure axes is iterable if there's only one target
@@ -172,10 +242,7 @@ def plot_random_search_results(results_by_target, param_space, model_name, metri
     for row_idx, (target_var, results_df) in enumerate(results_by_target.items()):
         for col_idx, (param, config) in enumerate(param_space.items()):
             ax = axes[row_idx][col_idx]
-            if config["type"] in ["int", "loguniform", "uniform"]:
-                data = results_df[param]
-            else:
-                data = results_df[param].apply(lambda x: x[0] if isinstance(x, tuple) else x)
+            data = results_df[param].apply(lambda x: x[0] if isinstance(x, tuple) else x)
 
             ax.scatter(data, results_df[metric_column], alpha=0.7, c="blue")
             ax.set_xlabel(param)
@@ -199,12 +266,7 @@ def tracking():
     # return {"loss": value, "status": STATUS_OK, ...params}
     # Convention: Hyperopt minimises 'loss' => we negate metrics we aim to maximise.
 def hyperopt_objective(params, model_name, model, X_train, X_test, y_train, y_test, target_var, metric, sample_size):
-    # Convert float parameters to integers or tuples where necessary
-    for key, value in params.items():
-        if param_spaces[model_name][key]["type"] == "int":
-            params[key] = int(value)
-        elif key == "hidden_layer_sizes":  # Special handling for tuple parameters
-            params[key] = (int(value),)
+    params = _cast_params(params, model_name)
 
     # Ensure constraints (e.g., min_samples_split > min_samples_leaf)
     if model_name == "Random Forest Regressor":
@@ -223,17 +285,8 @@ def hyperopt_objective(params, model_name, model, X_train, X_test, y_train, y_te
     model.fit(X_train_sample, y_train_sample[target_var])
     y_pred = model.predict(X_test)
 
-    # Evaluate the chosen metric
     n, p = X_test.shape
-    metric_value = (
-        mean_squared_error(y_test[target_var], y_pred) if metric == "MSE" else
-        r2_score(y_test[target_var], y_pred) if metric == "R^2" else
-        1 - (1 - r2_score(y_test[target_var], y_pred)) * (n - 1) / (n - p - 1) if metric == "ADJUSTED R^2" else
-        1 - np.sum((y_test[target_var] - y_pred) ** 2) / np.sum((y_test[target_var] - np.mean(y_test[target_var])) ** 2) if metric == "Q^2" else
-        None
-    )
-    if metric_value is None:
-        raise ValueError(f"Unsupported metric: {metric}")
+    metric_value = _compute_metric(y_test[target_var], y_pred, metric, n, p)
 
     # For maximising metrics, return the negative value; for minimising, return as-is
     return {"loss": metric_value if metric == "MSE" else -metric_value, "status": STATUS_OK, **params}
@@ -290,7 +343,8 @@ def convert_to_hyperopt_space(param_space):
 # Drive TPE, collect Trials, and build a running "best so far" trace:
 # 'tracking_lists' = (list_of_best_params_over_time, list_of_best_metric_over_time)
 # This is used to plot convergence later.
-def run_hyperopt_optimisation(model_name, model, param_space, evals, X_train, X_test, y_train, y_test, target_var, metric, sample_size):
+def run_hyperopt_optimisation(model_name, model, param_space, evals, X_train, X_test, y_train, y_test, target_var, metric, sample_size,
+                              patience=None, min_delta=1e-4):
     start_time = time.time()
     trials = Trials()
     tracking_lists = tracking()  # Tracking best parameters and metric
@@ -298,13 +352,32 @@ def run_hyperopt_optimisation(model_name, model, param_space, evals, X_train, X_
     # Convert param_space to Hyperopt-compatible format
     hyperopt_space = convert_to_hyperopt_space(param_space)
 
+    # Build early-stopping function for fmin if patience is set.
+    # Hyperopt always minimises loss, so improvement = loss decreased by >= min_delta.
+    early_stop_fn = None
+    if patience is not None:
+        es_state = {"best": None, "count": 0}
+        def early_stop_fn(trials_obj, *args):
+            losses = [l for l in trials_obj.losses() if l is not None]
+            if not losses:
+                return False, {}
+            current_best = min(losses)
+            if es_state["best"] is None or current_best < es_state["best"] - min_delta:
+                es_state["best"] = current_best
+                es_state["count"] = 0
+            else:
+                es_state["count"] += 1
+            return (es_state["count"] >= patience), {}
+
     # Run optimisation
     best_params = fmin(
         fn=lambda params: hyperopt_objective(params, model_name, model, X_train, X_test, y_train, y_test, target_var, metric, sample_size),
         space=hyperopt_space,
         algo=tpe.suggest,
         max_evals=evals,
-        trials=trials)
+        trials=trials,
+        early_stop_fn=early_stop_fn,
+    )
 
     # Convert integer parameters back from floats if needed
     for key, value in best_params.items():
@@ -316,16 +389,29 @@ def run_hyperopt_optimisation(model_name, model, param_space, evals, X_train, X_
         trial_result = {key: val for key, val in trial["result"].items() if key not in ["loss", "status"]}
         update_best_values(tracking_lists, trial_result, trial["result"]["loss"], metric)
 
+    actual_iters = len(trials.trials)
+    stopped_early = actual_iters < evals
+    if stopped_early:
+        print(f"  Early stopping at {actual_iters}/{evals} evaluations (no improvement > {min_delta} for {patience} steps)")
+
     elapsed_time = time.time() - start_time
     print(f"Hyperopt completed in: {format_elapsed_time(elapsed_time)}")
- 
-    return best_params, tracking_lists, elapsed_time
+
+    es_info = {
+        "stopped_early": stopped_early,
+        "actual_iters": actual_iters,
+        "max_iters": evals,
+        "patience": patience,
+        "min_delta": min_delta,
+    }
+    return best_params, tracking_lists, elapsed_time, es_info
 
 # Plotting for Hyperopt
-def plot_hyperopt_results(results_by_target, param_space, model_name, metric):
+def plot_hyperopt_results(results_by_target, param_space, model_name, metric, es_info_by_target=None):
     metric_column = metric.upper()
     num_targets = len(results_by_target)
     num_params = len(param_space)
+    es_info_by_target = es_info_by_target or {}
 
     # Create subplots for each target variable
     fig, axes = plt.subplots(
@@ -340,7 +426,10 @@ def plot_hyperopt_results(results_by_target, param_space, model_name, metric):
     # Plot results for each target variable
     for row_idx, (target_var, tracking_lists) in enumerate(results_by_target.items()):
         best_params, best_metric = tracking_lists
+        if not best_params:
+            continue
         param_names = list(best_params[0].keys())  # Hyperparameter names
+        es = es_info_by_target.get(target_var, {})
 
         # Plot hyperparameter evolution
         for col_idx, param_name in enumerate(param_names):
@@ -352,12 +441,13 @@ def plot_hyperopt_results(results_by_target, param_space, model_name, metric):
             ax.set_title(f"{target_var}: {param_name}")
             ax.grid(True)
 
-        # Plot metric evolution
+        # Plot metric evolution; annotate with ES info if triggered
         ax = axes[row_idx, -1]
         ax.plot(range(1, len(best_metric) + 1), best_metric, color="green", marker=".")
         ax.set_xlabel("Iteration #")
         ax.set_ylabel(metric_column)
-        ax.set_title(f"{target_var}: {metric_column}")
+        iter_label = f" [{es['actual_iters']}/{es['max_iters']} iters, ES]" if es.get("stopped_early") else ""
+        ax.set_title(f"{target_var}: {metric_column}{iter_label}")
         ax.grid(True)
 
     # Adjust layout
@@ -368,15 +458,8 @@ def plot_hyperopt_results(results_by_target, param_space, model_name, metric):
 # Same casting/constraints as Hyperopt but arg signature is a flat list of values.
 # Return raw metric (positive if maximising, MSE if minimising).
 def skopt_objective(params, model_name, model, X_train, X_test, y_train, y_test, target_var, metric, sample_size):
-    # Convert params to dictionary
     param_dict = {param_name: param_value for param_name, param_value in zip(param_spaces[model_name].keys(), params)}
-
-    # Handle parameter types
-    for key, value in param_dict.items():
-        if param_spaces[model_name][key]["type"] == "int":
-            param_dict[key] = int(value)
-        elif key == "hidden_layer_sizes":
-            param_dict[key] = (int(value),)
+    param_dict = _cast_params(param_dict, model_name)
 
     # Enforce constraints
     if model_name == "Random Forest Regressor":
@@ -390,33 +473,21 @@ def skopt_objective(params, model_name, model, X_train, X_test, y_train, y_test,
     else:
         X_train_sample, y_train_sample = X_train, y_train
 
-    # Fit the model with the sampled parameters
     model.set_params(**param_dict)
     model.fit(X_train_sample, y_train_sample[target_var])
     y_pred = model.predict(X_test)
 
-    # Calculate metrics
     n, p = X_test.shape
-    metric_value = (
-        mean_squared_error(y_test[target_var], y_pred) if metric == "MSE" else
-        r2_score(y_test[target_var], y_pred) if metric == "R^2" else
-        1 - (1 - r2_score(y_test[target_var], y_pred)) * (n - 1) / (n - p - 1) if metric == "ADJUSTED R^2" else
-        1 - np.sum((y_test[target_var] - y_pred) ** 2) / np.sum((y_test[target_var] - np.mean(y_test[target_var])) ** 2) if metric == "Q^2" else
-        None
-    )
-
-    if metric_value is None:
-        raise ValueError(f"Unsupported metric: {metric}")
-
-    return metric_value
+    return _compute_metric(y_test[target_var], y_pred, metric, n, p)
 
  # Build skopt space (Real/Integer/Categorical).
-    # Use a callback to:
+    # Use callbacks to:
     #   - update tqdm progress
     #   - append current best (param_dict, metric_value) to tracking lists
+    #   - trigger early stopping (returning True from a callback stops gp_minimize)
     # After optimisation, extract best params and best metric value.
-    # Note: gp_minimize is stochastic unless you set random_state in newer versions; add it if you need strict reproducibility.
-def run_skopt_optimisation(model_name, model, param_space, calls, X_train, X_test, y_train, y_test, target_var, metric, sample_size, n_jobs):
+def run_skopt_optimisation(model_name, model, param_space, calls, X_train, X_test, y_train, y_test, target_var, metric, sample_size, n_jobs,
+                           patience=None, min_delta=1e-4):
     start_time = time.time()
     tracking_lists = tracking()
 
@@ -430,6 +501,9 @@ def run_skopt_optimisation(model_name, model, param_space, calls, X_train, X_tes
         for param, bounds in param_space.items()
     ]
 
+    # Early stopping state; gp_minimize stops when a callback returns True
+    es_state = {"best": None, "count": 0, "stopped_at": None}
+
     with tqdm(total=calls, desc=f"Scikit-Optimize Progress for {model_name} (Target: {target_var})", unit="call") as pbar:
         def callback(res):
             pbar.update()
@@ -437,6 +511,19 @@ def run_skopt_optimisation(model_name, model, param_space, calls, X_train, X_tes
             param_dict = {param_name: param_value for param_name, param_value in zip(param_space.keys(), res.x)}
             tracking_lists[0].append(param_dict)
             tracking_lists[1].append(metric_value)
+
+            if patience is not None:
+                # res.fun is the best loss seen so far (skopt always minimises)
+                current_best = res.fun
+                if es_state["best"] is None or current_best < es_state["best"] - min_delta:
+                    es_state["best"] = current_best
+                    es_state["count"] = 0
+                else:
+                    es_state["count"] += 1
+                if es_state["count"] >= patience:
+                    es_state["stopped_at"] = len(res.func_vals)
+                    return True  # signal gp_minimize to stop
+            return False
 
         results = gp_minimize(
             lambda params: -skopt_objective(params, model_name, model, X_train, X_test, y_train, y_test, target_var, metric, sample_size)
@@ -447,19 +534,32 @@ def run_skopt_optimisation(model_name, model, param_space, calls, X_train, X_tes
             callback=[callback]
         )
 
+    actual_iters = es_state["stopped_at"] if es_state["stopped_at"] is not None else len(results.func_vals)
+    stopped_early = actual_iters < calls
+    if stopped_early:
+        print(f"  Early stopping at {actual_iters}/{calls} calls (no improvement > {min_delta} for {patience} steps)")
+
     best_params = {param_name: param_value for param_name, param_value in zip(param_space.keys(), results.x)}
     best_metric_value = -results.fun if metric in ["R^2", "ADJUSTED R^2", "Q^2"] else results.fun
 
     elapsed_time = time.time() - start_time
     print(f"Scikit-Optimize completed in: {format_elapsed_time(elapsed_time)}")
 
-    return best_params, tracking_lists, best_metric_value, elapsed_time
+    es_info = {
+        "stopped_early": stopped_early,
+        "actual_iters": actual_iters,
+        "max_iters": calls,
+        "patience": patience,
+        "min_delta": min_delta,
+    }
+    return best_params, tracking_lists, best_metric_value, elapsed_time, es_info
 
 
-def plot_skopt_results(results_by_target, param_space, model_name, metric):
+def plot_skopt_results(results_by_target, param_space, model_name, metric, es_info_by_target=None):
     metric_column = metric.upper()
     num_targets = len(results_by_target)
     num_params = len(param_space)
+    es_info_by_target = es_info_by_target or {}
 
     # Create subplots: one row per target variable, columns for hyperparameters and the metric
     fig, axes = plt.subplots(
@@ -474,7 +574,10 @@ def plot_skopt_results(results_by_target, param_space, model_name, metric):
     # Plot results for each target variable
     for row_idx, (target_var, tracking_lists) in enumerate(results_by_target.items()):
         best_params, best_metric = tracking_lists
+        if not best_params:
+            continue
         param_names = list(best_params[0].keys())  # Hyperparameter names
+        es = es_info_by_target.get(target_var, {})
 
         # Plot hyperparameter evolution
         for col_idx, param_name in enumerate(param_names):
@@ -486,12 +589,13 @@ def plot_skopt_results(results_by_target, param_space, model_name, metric):
             ax.set_title(f"{target_var}: {param_name}")
             ax.grid(True)
 
-        # Plot metric evolution
+        # Plot metric evolution; annotate with ES info if triggered
         ax = axes[row_idx, -1]
         ax.plot(range(1, len(best_metric) + 1), best_metric, color="green", marker=".")
         ax.set_xlabel("Iteration #")
         ax.set_ylabel(metric_column)
-        ax.set_title(f"{target_var}: {metric_column}")
+        iter_label = f" [{es['actual_iters']}/{es['max_iters']} iters, ES]" if es.get("stopped_early") else ""
+        ax.set_title(f"{target_var}: {metric_column}{iter_label}")
         ax.grid(True)
 
     # Adjust layout
@@ -516,29 +620,42 @@ def run_hyperparameter_optimisation_workflow(
     calls: int = 100,
     n_jobs: int = -1,
     plot: bool = True,
-    output_dir: str = "images"
+    output_dir: str = "images",
+    early_stopping: dict = None,
 ):
     os.makedirs(output_dir, exist_ok=True)
     param_space = param_spaces[model_name]
     results_summary = {}
 
+    # Extract per-method early stopping settings
+    early_stopping = early_stopping or {}
+    es_rs = early_stopping.get("random_search", {})
+    es_ho = early_stopping.get("hyperopt", {})
+    es_sk = early_stopping.get("skopt", {})
+
     if "random" in methods_to_run:
         print(f"\nRunning Random Search for {model_name}...")
         rs_results_by_target = {}
         for target_var in target_columns:
-            rs_df, best_params, best_score, elapsed_time = run_random_search(
+            rs_df, best_params, best_score, elapsed_time, es_info = run_random_search(
                 model, param_space, X_train, X_test, y_train, y_test,
-                sample_size, n_iter, n_jobs, target_var, metric, sampling_method
+                sample_size, n_iter, n_jobs, target_var, metric, sampling_method,
+                patience=es_rs.get("patience"),
+                min_delta=es_rs.get("min_delta", 1e-4),
+                model_name=model_name,
             )
             rs_results_by_target[target_var] = {
                 "tracking": rs_df,
-                "elapsed_time": elapsed_time
+                "elapsed_time": elapsed_time,
+                "es_info": es_info,
             }
             print(f"Best for {target_var}: {best_params} | {metric} = {best_score:.4f}")
         if plot:
+            es_info_by_target = {tv: rs_results_by_target[tv]["es_info"] for tv in target_columns}
             fig = plot_random_search_results(
                 {k: v["tracking"] for k, v in rs_results_by_target.items()},
-                param_space, model_name, metric, sampling_method
+                param_space, model_name, metric, sampling_method,
+                es_info_by_target=es_info_by_target,
             )
             plot_path = os.path.join(output_dir, f"HPO_{model_name}_Random.png")
             fig.savefig(plot_path, bbox_inches="tight")
@@ -549,19 +666,24 @@ def run_hyperparameter_optimisation_workflow(
         print(f"\nRunning Hyperopt for {model_name}...")
         hyperopt_results_by_target = {}
         for target_var in target_columns:
-            best_params, tracking_lists, elapsed_time = run_hyperopt_optimisation(
+            best_params, tracking_lists, elapsed_time, es_info = run_hyperopt_optimisation(
                 model_name, model, param_space, evals, X_train, X_test,
-                y_train, y_test, target_var, metric, sample_size
+                y_train, y_test, target_var, metric, sample_size,
+                patience=es_ho.get("patience"),
+                min_delta=es_ho.get("min_delta", 1e-4),
             )
             hyperopt_results_by_target[target_var] = {
                 "tracking": tracking_lists,
-                "elapsed_time": elapsed_time
+                "elapsed_time": elapsed_time,
+                "es_info": es_info,
             }
             print(f"Best for {target_var}: {best_params}")
         if plot:
+            es_info_by_target = {tv: hyperopt_results_by_target[tv]["es_info"] for tv in target_columns}
             fig = plot_hyperopt_results(
                 {k: v["tracking"] for k, v in hyperopt_results_by_target.items()},
-                param_space, model_name, metric
+                param_space, model_name, metric,
+                es_info_by_target=es_info_by_target,
             )
             plot_path = os.path.join(output_dir, f"HPO_{model_name}_Hyperopt.png")
             fig.savefig(plot_path, bbox_inches="tight")
@@ -572,19 +694,24 @@ def run_hyperparameter_optimisation_workflow(
         print(f"\nRunning Scikit-Optimize for {model_name}...")
         skopt_results_by_target = {}
         for target_var in target_columns:
-            best_params, tracking_lists, best_score, elapsed_time = run_skopt_optimisation(
+            best_params, tracking_lists, best_score, elapsed_time, es_info = run_skopt_optimisation(
                 model_name, model, param_space, calls, X_train, X_test,
-                y_train, y_test, target_var, metric, sample_size, n_jobs
+                y_train, y_test, target_var, metric, sample_size, n_jobs,
+                patience=es_sk.get("patience"),
+                min_delta=es_sk.get("min_delta", 1e-4),
             )
             skopt_results_by_target[target_var] = {
                 "tracking": tracking_lists,
-                "elapsed_time": elapsed_time
+                "elapsed_time": elapsed_time,
+                "es_info": es_info,
             }
             print(f"Best for {target_var}: {best_params} | {metric} = {best_score:.4f}")
         if plot:
+            es_info_by_target = {tv: skopt_results_by_target[tv]["es_info"] for tv in target_columns}
             fig = plot_skopt_results(
                 {k: v["tracking"] for k, v in skopt_results_by_target.items()},
-                param_space, model_name, metric
+                param_space, model_name, metric,
+                es_info_by_target=es_info_by_target,
             )
             plot_path = os.path.join(output_dir, f"HPO_{model_name}_Skopt.png")
             fig.savefig(plot_path, bbox_inches="tight")
@@ -620,7 +747,8 @@ def run_all_models_optimisation(
     calls: int = 100,
     n_jobs: int = -1,
     plot: bool = True,
-    output_dir: str = "images"
+    output_dir: str = "images",
+    early_stopping: dict = None,
 ):
     # If user specified a subset of models, restrict to those
     if selected_model_names:
@@ -654,7 +782,8 @@ def run_all_models_optimisation(
             calls=calls,
             n_jobs=n_jobs,
             plot=plot,
-            output_dir=output_dir
+            output_dir=output_dir,
+            early_stopping=early_stopping,
         )
 
         # Process and store the best results for each HPO method
@@ -699,9 +828,15 @@ def run_all_models_optimisation(
                     else:
                         best_score, best_params = None, None
 
+                    es_info = tracking_data.get("es_info", {})
                     all_metrics[method][model_name][target_var] = {
                         metric: best_score,
-                        "elapsed_time": elapsed_time
+                        "elapsed_time": elapsed_time,
+                        "stopped_early": es_info.get("stopped_early", False),
+                        "actual_iters": es_info.get("actual_iters"),
+                        "max_iters": es_info.get("max_iters"),
+                        "patience": es_info.get("patience"),
+                        "min_delta": es_info.get("min_delta"),
                     }
 
                     optimised_keys = list(param_spaces[model_name].keys())
@@ -783,7 +918,6 @@ def compare_and_plot_optimisation_methods(
     ax.set_xticklabels(methods)
     ax.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize=10)
     plt.tight_layout()
-    plt.show()
 
     optimal_idx = np.argmin(metric_values) if metric_name.lower() in ["mse", "mae"] else np.argmax(metric_values)
     return params[optimal_idx], metrics[optimal_idx]
@@ -858,9 +992,16 @@ def process_hyperparameters(hyperparams, model_name):
         elif key in param_space:
             param_type = param_space[key]["type"]
             if param_type == "int":
-                processed_hyperparams[key] = int(value)
+                try:
+                    processed_hyperparams[key] = int(float(value))
+                except (ValueError, TypeError):
+                    processed_hyperparams[key] = value
             elif param_type in ["uniform", "loguniform"]:
-                processed_hyperparams[key] = float(value)
+                try:
+                    processed_hyperparams[key] = float(value)
+                except (ValueError, TypeError):
+                    # String-valued params like 'sqrt', 'log2' — pass through
+                    processed_hyperparams[key] = value
             else:
                 processed_hyperparams[key] = value
 
@@ -927,9 +1068,10 @@ def get_best_models_by_method_across_targets(
     selected_models, target_columns, metrics, params, metric_name, models_dict
 ):
     best_model_instances = {}
+    is_minimised = metric_name in ("MSE", "MAE")
 
     for model_name in selected_models:
-        best_score = -np.inf
+        best_score = np.inf if is_minimised else -np.inf
         best_method = None
         best_hyperparams = None
 
@@ -948,7 +1090,8 @@ def get_best_models_by_method_across_targets(
 
             if scores:
                 avg_score = np.mean(scores)
-                if avg_score > best_score:
+                is_better = avg_score < best_score if is_minimised else avg_score > best_score
+                if is_better:
                     best_score = avg_score
                     best_method = method
                     best_hyperparams = model_params
@@ -966,4 +1109,3 @@ def get_best_models_by_method_across_targets(
 
     return best_model_instances
 
-# If this code breaks... cry

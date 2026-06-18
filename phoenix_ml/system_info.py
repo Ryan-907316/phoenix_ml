@@ -7,7 +7,10 @@ import sys
 import platform
 import cpuinfo
 import psutil
-import win32com.client
+try:
+    import win32com.client as _win32com
+except ImportError:
+    _win32com = None
 import warnings
 import pandas as pd
 
@@ -59,9 +62,12 @@ class SystemInfo:
 
         # GPU Detection using WMI (Windows only)
         try:
-            wmi = win32com.client.GetObject("winmgmts:")
-            gpu_list = [gpu.Name.strip() for gpu in wmi.InstancesOf("Win32_VideoController")]
-            gpu_details = ", ".join(gpu_list) if gpu_list else "No dedicated GPU detected" # If user isn't on Windows then it won't work :(
+            if _win32com is None:
+                gpu_details = "GPU detection not available (Windows only)"
+            else:
+                wmi = _win32com.GetObject("winmgmts:")
+                gpu_list = [gpu.Name.strip() for gpu in wmi.InstancesOf("Win32_VideoController")]
+                gpu_details = ", ".join(gpu_list) if gpu_list else "No dedicated GPU detected"
         except Exception as e:
             gpu_details = f"GPU detection failed: {e}"
 
