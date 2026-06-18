@@ -1,12 +1,33 @@
 # physics_model.py
-# This is a generalised helper module for integrating physics-based equations that defines the dataset and then used to generate a residual dataset.
-# This method is known as Physics-Enhanced Residual Learning (PERL) and is a subset of Physics-Enhanced Machine Learning and is a hybrid modelling method.
-# For the script to insert your dataset and to define your equations, see the test_dataset_generation.py module, it provides more instructions on how to use this.
-# You should not have to modify this module in order to use the PERL part of the workflow.
+# Helper module for running physics-based models and generating residual datasets.
+# Script Mode physics scripts must export: governing_function, constants, input_vars, output_vars
+# See examples/DC_Motors_Dataset_Generation.py for a worked example.
 
+import importlib.util
 import pandas as pd
 import numpy as np
 from typing import Callable, Dict, List, Optional
+
+
+def import_physics_script(path: str):
+    """Dynamically import a user-written physics script and return the module.
+
+    The script must define:
+        governing_function(inputs, constants, time) -> pd.DataFrame
+        constants  = {...}
+        input_vars  = [...]
+        output_vars = [...]
+    Optional:
+        name_mapping = {...}  # if the script uses internal variable names
+        time_col     = None   # or a column name string
+    """
+    spec = importlib.util.spec_from_file_location("_user_physics_script", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load physics script: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 def run_physics_model(
     data: pd.DataFrame,
@@ -17,14 +38,8 @@ def run_physics_model(
     output_vars: List[str],
     name_mapping: Optional[Dict[str, str]] = None
 ) -> pd.DataFrame:
-    
-    # Run a physics model simulation defined by `governing_function`.
-    # Returns a DataFrame with columns named as '<Display Name>_physics'.
-    if time_col is not None:
-        time = data[time_col].values
-    else:
-        time = np.zeros(len(data))
-
+    """Run a physics model and return a DataFrame with columns named '<var>_physics'."""
+    time = data[time_col].values if time_col is not None else np.zeros(len(data))
     inputs = data[input_vars].copy()
     physics_df = governing_function(inputs, constants, time)
 
@@ -39,12 +54,13 @@ def run_physics_model(
 
     return physics_df
 
-# Compute (measured − simulated) residuals for each output variable.
+
 def compute_residuals(
     data: pd.DataFrame,
     physics_df: pd.DataFrame,
     output_vars: List[str]
 ) -> pd.DataFrame:
+    """Compute (measured − simulated) residuals for each output variable."""
     residuals = {}
     for var in output_vars:
         sim_col = f"{var}_physics"
@@ -54,18 +70,16 @@ def compute_residuals(
 
 
 def round_and_clean_floats(df: pd.DataFrame, decimal_places: int = 6) -> pd.DataFrame:
-# Utility: round floats and remove tiny trailing decimals for readability.
+    """Round floats and remove tiny trailing decimals for readability."""
     def clean_value(x):
         if isinstance(x, float):
             if abs(x - round(x)) < 10**-decimal_places:
                 return round(x)
             return round(x, decimal_places)
         return x
+    df = df.replace([np.inf, -np.inf], np.nan)
+    return df.map(clean_value)
 
-    df = df.replace([np.inf, -np.inf], np.nan)  # Gets rid of infs and NaNs
-    return df.map(clean_value)  # Map handles element-wise mapping 
-
-# Look at what they have to do to mimic a fraction
 
 def generate_simple_dataset(
     data: pd.DataFrame,
@@ -73,12 +87,11 @@ def generate_simple_dataset(
     input_vars: List[str],
     output_vars: List[str]
 ) -> pd.DataFrame:
-    
-    # Combine input features and pure physics-based outputs into a simple dataset. 
+    """Combine input features and pure physics-based outputs into a simple dataset."""
     return pd.concat([
         data[input_vars].reset_index(drop=True),
         physics_df[[f"{var}_physics" for var in output_vars]].reset_index(drop=True)
-    ], axis=1).rename(columns=dict(zip([f"{var}_physics" for var in output_vars], output_vars)))
+    ], axis=1).rename(columns={f"{var}_physics": var for var in output_vars})
 
 
 def generate_residual_dataset(
@@ -88,22 +101,26 @@ def generate_residual_dataset(
     output_vars: List[str],
     name_mapping: Optional[Dict[str, str]] = None
 ) -> pd.DataFrame:
-    # Generate a residual dataset (input features + residuals).  
-    input_cols = [col for col in data.columns if col.startswith("Input") or col in input_vars]
+    """Generate a residual dataset: input features + (measured − physics) for each output."""
+    # Only keep columns listed in input_vars
+    input_cols = [col for col in data.columns if col in input_vars]
 
-    # Map display names back to internal names
+    # Map display names to internal names for residual computation
     mapped_vars = []
     for var in output_vars:
         internal_name = name_mapping.get(var, var) if name_mapping else var
         if internal_name in data.columns and f"{var}_physics" in physics_df.columns:
             mapped_vars.append((var, internal_name))
 
-    # Compute residuals 
     residuals = {}
     for display_name, internal_name in mapped_vars:
         physics_col = f"{display_name}_physics"
-        residuals[f"Residual {display_name}"] = data[internal_name].values - physics_df[physics_col].values
+        residuals[f"Residual {display_name}"] = (
+            data[internal_name].values - physics_df[physics_col].values
+        )
 
     residual_df = pd.DataFrame(residuals)
-    return pd.concat([data[input_cols].reset_index(drop=True), residual_df.reset_index(drop=True)], axis=1)
-
+    return pd.concat(
+        [data[input_cols].reset_index(drop=True), residual_df.reset_index(drop=True)],
+        axis=1
+    )

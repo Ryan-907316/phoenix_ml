@@ -4,6 +4,9 @@
 # Please note that reports can reach multiple dozens of pages long and contain a lot of images. Some of these images can be hard to read, I'm working on it.
 # For more information refer to the reportlab documentation.
 
+import math
+from PIL import Image as PILImage
+
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -14,7 +17,91 @@ from datetime import datetime
 from reportlab.platypus import Image
 import matplotlib.pyplot as plt
 
+_PAGE_IMG_WIDTH  = 170 * mm   # usable width on an A4 page with 20mm margins
+# A4 frame height with 20 mm top+bottom margins ≈ 789 pt; keep a safe margin below that.
+_PAGE_IMG_HEIGHT = 230 * mm   # ~652 pt — one safe page-slice height for tall figures
+
+
+def _proportional_image(path, max_width=_PAGE_IMG_WIDTH, max_height=_PAGE_IMG_HEIGHT):
+    """Return a single ReportLab Image scaled to fit within max_width × max_height.
+    Use _insert_image() instead when the image might need to span multiple pages.
+    """
+    img = Image(path)
+    if not img.drawWidth:
+        return Image(path, width=max_width)
+    aspect = img.drawHeight / img.drawWidth
+    w, h = max_width, max_width * aspect
+    if max_height and h > max_height:
+        h = max_height
+        w = h / aspect
+    return Image(path, width=w, height=h)
+
+
+def _insert_image(elements, path, max_width=_PAGE_IMG_WIDTH, max_height=_PAGE_IMG_HEIGHT,
+                  n_subplot_rows=None):
+    """Insert an image into elements, slicing it into page-height strips if too tall.
+
+    When n_subplot_rows is provided, cuts are made only at subplot-row boundaries so no
+    individual subplot panel is split across two pages.  A CondPageBreak is placed before
+    every strip so each strip lands on a page with enough room to hold it fully.
+    Falls back to a single scaled Image if PIL cannot open the file.
+    """
+    from reportlab.platypus import CondPageBreak
+
+    try:
+        pil_img = PILImage.open(path)
+        pil_img.load()
+        img_w_px, img_h_px = pil_img.size
+    except Exception:
+        elements.append(_proportional_image(path, max_width, max_height))
+        return
+
+    if img_w_px == 0 or img_h_px == 0:
+        pil_img.close()
+        return
+
+    pts_per_pixel = max_width / img_w_px
+    display_h = img_h_px * pts_per_pixel
+
+    if display_h <= max_height:
+        # Fits on one page — CondPageBreak prevents it starting near the bottom
+        elements.append(CondPageBreak(display_h))
+        elements.append(Image(path, width=max_width, height=display_h))
+        pil_img.close()
+        return
+
+    # Build y-cut boundaries at subplot-row boundaries when possible ----------------
+    if n_subplot_rows and n_subplot_rows > 1:
+        row_h_px   = img_h_px / n_subplot_rows
+        row_h_pts  = row_h_px * pts_per_pixel
+        rows_per_slice = max(1, int(max_height / row_h_pts))
+        y_cuts = [int(round(r * row_h_px))
+                  for r in range(0, n_subplot_rows, rows_per_slice)]
+        y_cuts.append(img_h_px)
+        y_cuts = sorted(set(y_cuts))
+    else:
+        # No row metadata — fall back to plain pixel slicing
+        pixels_per_slice = max(1, int(max_height / pts_per_pixel))
+        y_cuts = list(range(0, img_h_px, pixels_per_slice)) + [img_h_px]
+
+    base, ext = os.path.splitext(path)
+
+    for i, (y0, y1) in enumerate(zip(y_cuts[:-1], y_cuts[1:])):
+        strip = pil_img.crop((0, y0, img_w_px, y1))
+        strip_path = f"{base}_part{i + 1}{ext}"
+        strip.save(strip_path, format="PNG")
+        strip.close()
+
+        strip_display_h = (y1 - y0) * pts_per_pixel
+        elements.append(CondPageBreak(strip_display_h))
+        elements.append(Image(strip_path, width=max_width, height=strip_display_h))
+        if i < len(y_cuts) - 2:
+            elements.append(Spacer(1, 4))
+
+    pil_img.close()
+
 import os
+import pandas as pd
 
 from phoenix_ml.system_info import SystemInfo
 from phoenix_ml.data_preprocessing import *
@@ -108,14 +195,52 @@ def save_preprocessing_plots(results, output_dir, prefix="preprocessing"):
 
     for label, fig in results["figures"].items():
         path = os.path.join(output_dir, f"{prefix}_{label.lower().replace(' ', '_')}.png")
-        fig.savefig(path)
+        fig.savefig(path, dpi=150, bbox_inches='tight')
         plot_paths[label] = path
-        plt.close(fig)  # Close after saving
+        plt.close(fig)
 
     return plot_paths
 
 
-def add_preprocessing_section(elements, results, plot_paths, dataset_path, styles):
+def _build_dist_corr_caption(dummy, mp):
+    """Return a list of paragraph strings for the Distance Correlation report caption."""
+    paras = [
+        "Distance correlation matrix across input features. Distance correlation captures general "
+        "(including non-linear) dependence; values near 1 suggest strong dependence, while values "
+        "near 0 suggest weak or no dependence. Use this to spot redundant features or feature clusters."
+    ]
+    if dummy:
+        paras.append(
+            "A dummy (purely random) variable is included as a noise baseline. Any feature whose "
+            "distance correlation with another variable is similar to or below the dummy's row of values "
+            "is exhibiting dependence no stronger than random noise, and may not carry genuine information."
+        )
+    if mp:
+        paras.append(
+            "Marchenko-Pastur (MP) thresholding has been applied to denoise the matrix. This technique "
+            "uses Random Matrix Theory to estimate how many independent correlation patterns in the data "
+            "are genuinely stronger than what would arise by chance in a matrix of the same size. Patterns "
+            "weaker than this noise floor are discarded, and the matrix is reconstructed from the remaining "
+            "signal patterns only."
+        )
+        paras.append(
+            "The noise threshold lambda+ = (1 + sqrt(p/n))^2 is the Marchenko-Pastur upper bound, where "
+            "p is the number of features and n the number of samples. Any eigenvalue of the correlation "
+            "matrix below lambda+ is statistically indistinguishable from random noise at the given "
+            "dataset size and is discarded. A larger lambda+ (when p is large relative to n) means the "
+            "bar for retaining a signal component is higher, so fewer components survive."
+        )
+        paras.append(
+            "The subtitle on the plot shows how many signal components were retained. When only a few "
+            "are kept, the dataset's correlation structure is dominated by those shared patterns. "
+            "Features with high values in the denoised matrix are strongly tied to the retained signal; "
+            "features near zero after denoising show correlations no stronger than sampling noise."
+        )
+    return paras
+
+
+def add_preprocessing_section(elements, results, plot_paths, dataset_path, styles,
+                              dist_corr_dummy=True, dist_corr_mp=False):
     elements.append(Paragraph("Preprocessing Summary", styles["CustomHeading"]))
 
     meta = results.get("meta", {})
@@ -130,6 +255,7 @@ def add_preprocessing_section(elements, results, plot_paths, dataset_path, style
          f"Train: {meta.get('train_count','?')} ({meta.get('train_prop',0):.1%})  |  "
          f"Test: {meta.get('test_count','?')} ({meta.get('test_prop',0):.1%})  "
          f"[method: {meta.get('split_method','?')}, requested test_size={meta.get('test_size_param','?')}]"],
+        ["Feature scaling", meta.get("scaler_name", "StandardScaler")],
     ]
     tbl = Table(table_data, colWidths=[40*mm, 120*mm])
     tbl.setStyle(TableStyle([
@@ -171,12 +297,7 @@ def add_preprocessing_section(elements, results, plot_paths, dataset_path, style
             "Long whiskers/head-heavy tails indicate skew; many points beyond whiskers indicate potential outliers."
             "See the legend of each plot for more information."
         ),
-        "Distance Correlation": (
-            "Distance correlation matrix across input features. Distance correlation captures general (including "
-            "non-linear) dependence; values near 1 suggest strong dependence, while values near 0 suggest weak or no "
-            "dependence. Use this to spot redundant features or feature clusters. "
-            "An optional dummy variable can be added, serving as a control variable and values above the dummy indicate more than random dependence."
-        ),
+        "Distance Correlation": _build_dist_corr_caption(dist_corr_dummy, dist_corr_mp),
     }
 
     # Render plots with their richer captions
@@ -184,14 +305,21 @@ def add_preprocessing_section(elements, results, plot_paths, dataset_path, style
         if not os.path.exists(img_path):
             continue
 
-        # Pick caption
+        # Pick caption — handle multi-part keys like "Boxplots Part 2" or "Features vs CO Part 2"
         if label.startswith("Features vs "):
             caption = captions["_features_vs_"]
+        elif label.startswith("Boxplots"):
+            caption = captions["Boxplots"]
         else:
             caption = captions.get(label, label)
 
-        elements.append(Paragraph(caption, styles["CustomBody"]))
-        elements.append(Image(img_path, width=160*mm, height=100*mm))
+        if isinstance(caption, list):
+            for para in caption:
+                elements.append(Paragraph(para, styles["CustomBody"]))
+                elements.append(Spacer(1, 5))
+        else:
+            elements.append(Paragraph(caption, styles["CustomBody"]))
+        _insert_image(elements, img_path)
         elements.append(Spacer(1, 12))
 
 def add_model_selection_section(elements, styles, selected_model_names, preferred_model_name=None):
@@ -232,8 +360,10 @@ def add_model_training_table_to_report(elements, results_df, styles, max_rows=10
         display_df = results_df.copy()
         truncated = False
 
-    # Convert the DataFrame to a list of lists (rows)
-    data = [display_df.columns.tolist()] + display_df.round(4).values.tolist()
+    # Convert the DataFrame to a list of lists (rows) — round numeric columns only
+    num_cols = display_df.select_dtypes(include='number').columns
+    display_df[num_cols] = display_df[num_cols].round(4)
+    data = [display_df.columns.tolist()] + display_df.values.tolist()
 
     # Create the table
     table = Table(data, repeatRows=1, colWidths=[4 * cm] + [2.5 * cm] * (len(data[0]) - 1))
@@ -275,12 +405,14 @@ def add_uq_section(elements, uq_plot_paths, styles, stage="Before HPO", uq_setti
         calibration_frac = uq_settings.get("calibration_frac", "N/A")
         test_size = uq_settings.get("subsample_test_size", "N/A")
 
+        n_jobs = uq_settings.get("n_jobs", 1)
         settings_html = f"""
             <b>UQ Method:</b> {method_used}<br/>
             <b>Number of Bootstraps:</b> {n_bootstrap}<br/>
             <b>Confidence Interval (CI):</b> {conf_interval}%<br/>
             <b>Calibration Fraction:</b> {calibration_frac}<br/>
-            <b>Subsample Test Size:</b> {test_size}
+            <b>Subsample Test Size:</b> {test_size}<br/>
+            <b>Parallel Jobs (Bootstrap):</b> {n_jobs}
         """
         elements.append(Spacer(1, 6))
         elements.append(Paragraph(settings_html, styles["CustomBody"]))
@@ -291,7 +423,7 @@ def add_uq_section(elements, uq_plot_paths, styles, stage="Before HPO", uq_setti
     for label, img_path in uq_plot_paths.items():
         if os.path.exists(img_path):
             elements.append(Paragraph(label, styles["CustomBody"]))
-            elements.append(Image(img_path, width=170*mm, height=100*mm))
+            _insert_image(elements, img_path)
             elements.append(Spacer(1, 12))
         else:
             elements.append(Paragraph(f"Could not find UQ image: {img_path}", styles["CustomBody"]))
@@ -315,7 +447,7 @@ def handle_uq_reporting_section(
         clean_stage = stage_label.replace(' ', '_').replace("_Before_HPO", "")
         fname = f"UQ_{clean_model}_{clean_stage}.png"
         fpath = os.path.join(image_output_dir, fname)
-        fig.savefig(fpath)
+        fig.savefig(fpath, dpi=150, bbox_inches='tight')
         plt.close(fig)
         uq_plot_paths[model_name] = fpath
 
@@ -349,31 +481,41 @@ def add_interpretability_section(
     elements.append(Paragraph(setting_text, styles["CustomBody"]))
     elements.append(Spacer(1, 12))
 
-    # Plot type descriptions
+    # Plot type descriptions — keyed by the prefix used in figure names
     descriptions = {
-        "ICE/PDP": "ICE and PDP plots show how individual features affect model predictions. ICE (blue) shows per-sample curves, while PDP (orange) shows the average trend.",
-        "SHAP_Summary": "SHAP summary plots show the overall importance and distribution of SHAP values across all features.",
-        "SHAP_Dependence": "SHAP dependence plots illustrate how each feature's value relates to its SHAP value, indicating feature interaction and impact."
+        "ICE_PDP":        "ICE and PDP plots show how individual features affect model predictions. ICE (blue) shows per-sample curves, while PDP (orange) shows the average trend.",
+        "SHAP_Summary":   "SHAP summary plots show the overall importance and distribution of SHAP values across all features.",
+        "SHAP_Dependence":"SHAP dependence plots illustrate how each feature's value relates to its SHAP value, indicating feature interaction and impact.",
     }
+    _PREFIXES = ("ICE_PDP_", "SHAP_Summary_", "SHAP_Dependence_")
 
-    for fig_name, fig in interpretability_figures.items():
-        fig_path = os.path.join(output_dir, f"{fig_name.replace(' ', '_')}.png")
-        fig.savefig(fig_path, bbox_inches='tight')
-        plt.close(fig)
+    for fig_name, fig_or_list in interpretability_figures.items():
+        # plotting functions return a list of figures (one per PDF page worth of rows)
+        fig_list = fig_or_list if isinstance(fig_or_list, list) else [fig_or_list]
 
-        # Split figure name to extract type and target
-        parts = fig_name.split("_")
-        if len(parts) >= 3:
-            label_type = "_".join(parts[:2])  # e.g., SHAP_Summary
-            target_name = "_".join(parts[2:])  # e.g., Motor_Speed
-        else:
-            label_type = parts[0]
-            target_name = "_".join(parts[1:]) if len(parts) > 1 else "Unknown Target"
+        # Extract label type and target — show caption once before the first part
+        label_type = fig_name
+        target_name = ""
+        for prefix in _PREFIXES:
+            if fig_name.startswith(prefix):
+                label_type = prefix.rstrip("_")
+                target_name = fig_name[len(prefix):]
+                break
 
-        # Add figure to PDF
-        elements.append(Paragraph(f"{label_type.replace('_', ' ')} for {target_name}", styles["CustomBody"]))
+        display_label = label_type.replace("_", " ")
+        caption = f"{display_label} for {target_name}" if target_name else display_label
+        elements.append(Paragraph(caption, styles["CustomBody"]))
         elements.append(Paragraph(descriptions.get(label_type, "Interpretability plot."), styles["CustomBody"]))
-        elements.append(Image(fig_path, width=170*mm, height=100*mm))
+
+        for part_idx, fig in enumerate(fig_list):
+            part_suffix = f"_part{part_idx + 1}" if len(fig_list) > 1 else ""
+            fig_path = os.path.join(output_dir, f"{fig_name.replace(' ', '_')}{part_suffix}.png")
+            fig.savefig(fig_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            _insert_image(elements, fig_path)
+            if part_idx < len(fig_list) - 1:
+                elements.append(Spacer(1, 4))
+
         elements.append(Spacer(1, 12))
 
 def add_hpo_summary_section(
@@ -393,7 +535,8 @@ def add_hpo_summary_section(
     n_jobs: int,
     csv_path: str,
     best_models_per_target,
-    output_dir: str = "report_images"
+    output_dir: str = "report_images",
+    early_stopping: dict = None,
 ):
     if isinstance(best_models_per_target, dict):
         best_models_per_target = pd.DataFrame.from_dict(best_models_per_target, orient="index")
@@ -429,35 +572,56 @@ def add_hpo_summary_section(
         "skopt": f"Scikit-Optimize (Bayesian optimisation with Gaussian Processes, {calls} calls)"
     }
 
+    # Build early-stopping description per method
+    es = early_stopping or {}
+    es_method_map = {"random": "random_search", "hyperopt": "hyperopt", "skopt": "skopt"}
+    def _es_desc(method_key):
+        cfg = es.get(es_method_map.get(method_key, ""), {})
+        p = cfg.get("patience")
+        d = cfg.get("min_delta", 1e-4)
+        if p is None:
+            return "early stopping disabled"
+        return f"early stopping: patience={p}, min_delta={d}"
+
     settings_text = "This section presents the best performance for each model and target variable across the selected HPO methods. "
     settings_text += f"The chosen evaluation metric is <b>{metric_used}</b>.<br/><br/>"
 
     settings_text += "<b>HPO Methods and Settings:</b><br/>"
     for method in methods_used:
         if method in methods_description:
-            settings_text += f"• <b>{method.capitalize()}</b>: {methods_description[method]}<br/>"
+            settings_text += f"• <b>{method.capitalize()}</b>: {methods_description[method]}; {_es_desc(method)}<br/>"
 
     elements.append(Paragraph(settings_text, styles["CustomBody"]))
     elements.append(Spacer(1, 12))
 
-    # Per-model breakdown
-    model_names = list(hpo_metrics[methods_used[0]].keys())  # Assumes consistent keys
+    # Per-model breakdown — only iterate methods that actually produced results
+    active_methods = [m for m in methods_used if m in hpo_metrics and hpo_metrics[m]]
+    if not active_methods:
+        return
+    model_names = list(hpo_metrics[active_methods[0]].keys())
 
     for model_name in model_names:
         elements.append(Paragraph(f"{model_name}", styles["CustomSubheading"]))
 
-        for method in methods_used:
+        for method in active_methods:
             if model_name not in hpo_metrics[method]:
                 continue
 
             elements.append(Paragraph(f"<b>Method:</b> {method.capitalize()}", styles["CustomBody"]))
 
             # Table Header
-            table_data = [["Target Variable", f"Best {metric_used}", "Elapsed Time (s)", "Best Parameters"]]
+            table_data = [["Target Variable", f"Best {metric_used}", "Iterations", "Elapsed Time (s)", "Best Parameters"]]
 
             for target_var, metric_data in hpo_metrics[method][model_name].items():
                 best_score = metric_data.get(metric_used)
                 elapsed = round(metric_data.get("elapsed_time", 0), 2)
+                actual = metric_data.get("actual_iters")
+                max_it = metric_data.get("max_iters")
+                stopped = metric_data.get("stopped_early", False)
+                if actual is not None and max_it is not None:
+                    iter_str = f"{actual}/{max_it} (ES)" if stopped else f"{actual}/{max_it}"
+                else:
+                    iter_str = "N/A"
                 best_params = hpo_params[method][model_name].get(target_var, {})
                 params_str = ", ".join(f"{k}={v}" for k, v in best_params.items())
                 params_paragraph = Paragraph(params_str if params_str else "N/A", param_style)
@@ -465,12 +629,13 @@ def add_hpo_summary_section(
                 table_data.append([
                     target_var,
                     f"{best_score:.4f}" if best_score is not None else "N/A",
+                    iter_str,
                     f"{elapsed:.2f}",
                     params_paragraph
                 ])
 
             # Style and insert table
-            table = Table(table_data, colWidths=[40*mm, 30*mm, 30*mm, 70*mm])
+            table = Table(table_data, colWidths=[35*mm, 25*mm, 25*mm, 25*mm, 60*mm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
@@ -486,7 +651,7 @@ def add_hpo_summary_section(
             # Insert existing HPO plot image if available
             plot_path = hpo_plots.get(method, {}).get(model_name)
             if plot_path and os.path.exists(plot_path):
-                elements.append(Image(plot_path, width=14*cm, height=7*cm))
+                elements.append(_proportional_image(plot_path, max_width=14*cm, max_height=10*cm))
                 elements.append(Spacer(1, 12))
             else:
                 elements.append(Paragraph(f"No HPO plot found for {model_name} using {method}.", styles["CustomBody"]))
@@ -605,6 +770,38 @@ def add_hpo_summary_section(
         elements.append(table)
         elements.append(Spacer(1, 12))
 
+def add_pareto_section(elements, styles, plot_paths: dict, perf_metric: str):
+    """
+    Add a Pareto front analysis section to the report — one figure per target variable.
+    plot_paths: {target_var: image_path} from save_pareto_plots().
+    """
+    if not plot_paths:
+        return
+
+    elements.append(Paragraph("Pareto Front Analysis", styles["CustomHeading"]))
+    elements.append(Paragraph(
+        "The Pareto front identifies models where no alternative offers both better performance "
+        "and lower training cost simultaneously. Orange points are Pareto-optimal — removing any "
+        "one of them would require accepting a worse trade-off. Blue points are dominated: at least "
+        "one other model achieves equal or better performance in equal or less training time.",
+        styles["CustomBody"]
+    ))
+    elements.append(Spacer(1, 5))
+    elements.append(Paragraph(
+        f"Performance axis shows the best {perf_metric} achieved across all HPO methods. "
+        "Training time is the wall-clock time recorded during baseline model training. "
+        "Axes switch to log scale automatically when values span more than one order of magnitude.",
+        styles["CustomBody"]
+    ))
+    elements.append(Spacer(1, 8))
+
+    for target_var, img_path in plot_paths.items():
+        if not os.path.exists(img_path):
+            continue
+        _insert_image(elements, img_path)
+        elements.append(Spacer(1, 12))
+
+
 def add_postprocessing_section(
     elements,
     styles,
@@ -673,28 +870,30 @@ def add_postprocessing_section(
     cooks_fig = postprocessing_results.get("cooks_fig")
     if cooks_fig:
         path = os.path.join(image_output_dir, "cooks_distance.png")
-        cooks_fig.savefig(path, dpi=300, bbox_inches='tight')
+        cooks_fig.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close(cooks_fig)
         elements.append(Paragraph("Cook's Distance", styles["CustomSubheading"]))
         elements.append(Paragraph(
             "Cook's Distance identifies influential data points in the test set that may disproportionately affect the model's predictions. "
             "Values exceeding the threshold (4/n) are flagged as potentially problematic.",
             styles["CustomBody"]
         ))
-        elements.append(Image(path, width=14*cm, height=7*cm))
+        elements.append(_proportional_image(path, max_width=14*cm, max_height=10*cm))
         elements.append(Spacer(1, 12))
 
     # === 4. Residuals with Influential Points ===
     residuals_fig = postprocessing_results.get("residuals_fig")
     if residuals_fig:
         path = os.path.join(image_output_dir, "residuals_with_influential.png")
-        residuals_fig.savefig(path, dpi=300, bbox_inches='tight')
+        residuals_fig.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close(residuals_fig)
         elements.append(Paragraph("Residuals with Influential Points", styles["CustomSubheading"]))
         elements.append(Paragraph(
             "These plots visualise residuals versus predicted values. Points identified as influential (via Cook's Distance) are highlighted in red. "
             "Ideally, residuals should be symmetrically distributed around zero with no obvious patterns.",
             styles["CustomBody"]
         ))
-        elements.append(Image(path, width=14*cm, height=7*cm))
+        elements.append(_proportional_image(path, max_width=14*cm, max_height=10*cm))
         elements.append(Spacer(1, 12))
 
     # === 5. Residual Transformation Table (with AD highlighting) ===
@@ -710,9 +909,9 @@ def add_postprocessing_section(
         elements.append(Paragraph(explanation, styles["CustomBody"]))
         elements.append(Spacer(1, 6))
 
-        # Round numeric columns
+        # Round numeric columns (coerce None/NaN to float first to avoid TypeError)
         float_cols = ["Skewness", "Excess Kurtosis", "AD Statistic"]
-        transformation_df[float_cols] = transformation_df[float_cols].round(4)
+        transformation_df[float_cols] = transformation_df[float_cols].apply(pd.to_numeric, errors="coerce").round(4)
 
         # Identify minimum AD per target
         highlight_rows = set(
@@ -762,7 +961,8 @@ def add_postprocessing_section(
             if fig:
                 filename = f"transformed_{name}.png"
                 path = os.path.join(image_output_dir, filename)
-                fig.savefig(path, dpi=300, bbox_inches='tight')
+                fig.savefig(path, dpi=150, bbox_inches='tight')
+                plt.close(fig)
 
                 title_map = {
                     "residual": "Residuals vs. Predicted (Transformed)",
@@ -777,7 +977,7 @@ def add_postprocessing_section(
 
                 elements.append(Paragraph(title_map.get(name, name), styles["CustomBody"]))
                 elements.append(Paragraph(caption_map.get(name, ""), styles["CustomBody"]))
-                elements.append(Image(path, width=14*cm, height=7*cm))
+                elements.append(_proportional_image(path, max_width=14*cm, max_height=10*cm))
                 elements.append(Spacer(1, 12))
 
     elements.append(Spacer(1, 24))
@@ -810,3 +1010,230 @@ def add_artifacts_section(elements, styles, save_paths, models_dir):
     if "bundle" in save_paths:
         elements.append(Paragraph(f"<b>Bundle (.pkl):</b> {save_paths['bundle']}", styles["CustomBody"]))
         elements.append(Spacer(1, 6))
+
+
+def add_perl_section(elements, styles, perl_results: dict, perl_config: dict, output_dir: str):
+    """Add a Physics-Enhanced Machine Learning (PERL) section to the PDF report.
+
+    Includes: description, LaTeX equations, reconstruction map table,
+    RMSE metrics table, and predicted-vs-actual scatter plots per target.
+    """
+    import io
+    import numpy as np
+    from matplotlib.figure import Figure
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    elements.append(Spacer(1, 16))
+    elements.append(Paragraph("Physics-Enhanced Machine Learning (PERL) Reconstruction",
+                               styles["CustomHeading"]))
+    elements.append(Paragraph(
+        "Physics-Enhanced Residual Learning (PERL) combines first-principles physics equations with a "
+        "data-driven ML model. First, the physics equations are applied to the inputs to produce a "
+        "structured estimate of each target variable. The ML model is then trained only on the "
+        "<i>residuals</i> — the gap between that physics estimate and what was actually measured. "
+        "At prediction time, the physics estimate and the ML residual correction are simply added "
+        "together to give the final output. This means the ML model has a much smaller, better-defined "
+        "problem to solve, and the physics knowledge acts as an anchor that keeps predictions "
+        "physically sensible even outside the training range.",
+        styles["CustomBody"],
+    ))
+    elements.append(Spacer(1, 6))
+
+    # ── 0. Configuration info block ───────────────────────────────────────────
+    mode = perl_config.get("mode", "expression")
+    config_path = perl_config.get("_config_path", "")
+    mode_label = "Expression Mode" if mode == "expression" else "Script Mode"
+    config_info = f"<b>Physics mode:</b> {mode_label}"
+    if config_path:
+        config_info += f"<br/><b>Physics configuration file:</b> {config_path}"
+    if mode == "script":
+        script_path = perl_config.get("script_path", "")
+        if script_path:
+            config_info += f"<br/><b>Physics script:</b> {script_path}"
+    elements.append(Paragraph(config_info, styles["CustomBody"]))
+    elements.append(Spacer(1, 10))
+
+    # ── 1. Physics expressions as LaTeX images ───────────────────────────────
+    expressions = perl_config.get("expressions", [])
+    if mode == "script":
+        # Script mode: governing equations live in the script file — cite it instead
+        script_path = perl_config.get("script_path", "")
+        elements.append(Paragraph("Physics Model", styles["CustomSubheading"]))
+        elements.append(Paragraph(
+            "This run used Script Mode. The governing equations are defined in the "
+            f"<b>governing_function</b> of the physics script cited above"
+            + (f": <i>{script_path}</i>" if script_path else "") + ".",
+            styles["CustomBody"],
+        ))
+        elements.append(Spacer(1, 8))
+    elif expressions:
+        elements.append(Paragraph("Physics Expressions", styles["CustomSubheading"]))
+        elements.append(Paragraph(
+            "The following expressions were used to compute physics-based estimates and residuals:",
+            styles["CustomBody"],
+        ))
+        elements.append(Spacer(1, 4))
+
+        try:
+            from phoenix_ml.physics_expressions import parse_expression, expression_to_latex
+        except ImportError:
+            parse_expression = expression_to_latex = None
+
+        for i, expr_text in enumerate(expressions, start=1):
+            expr_text = expr_text.strip()
+            if not expr_text:
+                continue
+
+            # Try to render as LaTeX; fall back to plain text
+            latex_img_path = None
+            if parse_expression and expression_to_latex:
+                try:
+                    lhs, tree, name_map = parse_expression(expr_text)
+                    latex_str = expression_to_latex(lhs, tree, name_map)
+                    fig = Figure(figsize=(7, 0.5), dpi=150)
+                    fig.patch.set_facecolor("white")
+                    fig.text(0.01, 0.5, f"${latex_str}$",
+                             fontsize=13, va="center", ha="left", color="black")
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format="png", bbox_inches="tight",
+                                pad_inches=0.1, facecolor="white")
+                    buf.seek(0)
+                    pil_img = PILImage.open(buf)
+                    pil_img.load()
+                    latex_img_path = os.path.join(output_dir, f"perl_expr_{i}.png")
+                    pil_img.save(latex_img_path)
+                except Exception:
+                    latex_img_path = None
+
+            if latex_img_path and os.path.isfile(latex_img_path):
+                elements.append(_proportional_image(latex_img_path, max_width=160 * mm, max_height=25 * mm))
+            else:
+                elements.append(Paragraph(f"[{i}]  {expr_text}", styles["CustomBody"]))
+
+        elements.append(Spacer(1, 8))
+
+    # ── 2. Reconstruction map table ──────────────────────────────────────────
+    recon_map = perl_config.get("reconstruction_map", {})
+    if recon_map:
+        elements.append(Paragraph("Reconstruction Map", styles["CustomSubheading"]))
+        elements.append(Paragraph(
+            "Each residual target is paired with its physics estimate column for reconstruction:",
+            styles["CustomBody"],
+        ))
+        tbl_data = [["Residual Target", "Physics Estimate Column"]]
+        for tgt, phys_col in recon_map.items():
+            tbl_data.append([tgt, phys_col])
+        tbl = Table(tbl_data, hAlign="LEFT", colWidths=[80 * mm, 80 * mm])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+            ("TEXTCOLOR",  (0, 0), (-1, 0), colors.whitesmoke),
+            ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE",   (0, 0), (-1, -1), 8),
+            ("ALIGN",      (0, 0), (-1, -1), "LEFT"),
+            ("GRID",       (0, 0), (-1, -1), 0.4, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f4f8")]),
+        ]))
+        elements.append(tbl)
+        elements.append(Spacer(1, 10))
+
+    # ── 3. RMSE metrics table ────────────────────────────────────────────────
+    elements.append(Paragraph("PERL Reconstruction Metrics", styles["CustomSubheading"]))
+    has_comparison = any(
+        not (isinstance(v.get("rmse_physics"), float) and np.isnan(v["rmse_physics"]))
+        for v in perl_results.values()
+    )
+    if has_comparison:
+        hdr = ["Target Variable", "Physics-only RMSE", "PERL RMSE", "Improvement (%)"]
+        col_w = [60 * mm, 35 * mm, 35 * mm, 35 * mm]
+    else:
+        hdr = ["Target Variable", "ML Residual RMSE"]
+        col_w = [90 * mm, 70 * mm]
+
+    metrics_data = [hdr]
+    for target, res in perl_results.items():
+        rmse_phys = res.get("rmse_physics", float("nan"))
+        rmse_perl = res.get("rmse_perl",    float("nan"))
+        rmse_ml   = res.get("rmse_ml_residual", float("nan"))
+        if has_comparison:
+            if not np.isnan(rmse_phys) and not np.isnan(rmse_perl) and rmse_phys > 0:
+                improvement = f"{(rmse_phys - rmse_perl) / rmse_phys * 100:+.1f}%"
+            else:
+                improvement = "n/a"
+            metrics_data.append([
+                target,
+                f"{rmse_phys:.4f}" if not np.isnan(rmse_phys) else "n/a",
+                f"{rmse_perl:.4f}" if not np.isnan(rmse_perl) else "n/a",
+                improvement,
+            ])
+        else:
+            metrics_data.append([target, f"{rmse_ml:.4f}" if not np.isnan(rmse_ml) else "n/a"])
+
+    metrics_tbl = Table(metrics_data, hAlign="LEFT", colWidths=col_w)
+    metrics_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+        ("TEXTCOLOR",  (0, 0), (-1, 0), colors.whitesmoke),
+        ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE",   (0, 0), (-1, -1), 8),
+        ("ALIGN",      (0, 0), (-1, -1), "CENTER"),
+        ("GRID",       (0, 0), (-1, -1), 0.4, colors.grey),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f4f8")]),
+    ]))
+    elements.append(metrics_tbl)
+    elements.append(Spacer(1, 12))
+
+    # ── 4. Predicted-vs-actual scatter plots (one figure per target) ─────────
+    plot_targets = [t for t, v in perl_results.items() if v.get("y_actual") is not None]
+    if plot_targets:
+        elements.append(Paragraph("Predicted vs. Actual Plots", styles["CustomSubheading"]))
+        elements.append(Paragraph(
+            "Each figure compares the physics-only estimate (left) and the full PERL prediction "
+            "(right) against the measured values. A perfect model lies on the diagonal dashed line.",
+            styles["CustomBody"],
+        ))
+        elements.append(Spacer(1, 6))
+
+    for target in plot_targets:
+        res = perl_results[target]
+        y_actual  = np.asarray(res["y_actual"])
+        y_physics = np.asarray(res["y_physics"])
+        y_perl    = np.asarray(res["y_perl"])
+        rmse_phys     = res.get("rmse_physics", float("nan"))
+        rmse_perl_val = res.get("rmse_perl",    float("nan"))
+        original_col  = res.get("original_col") or target
+
+        if len(y_actual) == 0 or len(y_physics) == 0:
+            elements.append(Paragraph(f"No data available to plot for {target}.", styles["CustomBody"]))
+            continue
+
+        try:
+            fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+            fig.suptitle(f"PERL Reconstruction — {original_col}", fontsize=11, fontweight="bold")
+
+            for ax, y_pred, label, rmse_val, colour in [
+                (axes[0], y_physics, "Physics Estimate", rmse_phys,    "#2980b9"),
+                (axes[1], y_perl,    "PERL Prediction",  rmse_perl_val, "#27ae60"),
+            ]:
+                lo = min(float(y_actual.min()), float(y_pred.min()))
+                hi = max(float(y_actual.max()), float(y_pred.max()))
+                margin = (hi - lo) * 0.05 if hi != lo else abs(hi) * 0.05 + 1e-6
+                ax.scatter(y_actual, y_pred, alpha=0.45, s=14, color=colour, edgecolors="none")
+                ax.plot([lo - margin, hi + margin], [lo - margin, hi + margin],
+                        "k--", linewidth=1.0)
+                ax.set_xlabel(f"Actual {original_col}", fontsize=8)
+                ax.set_ylabel(label, fontsize=8)
+                rmse_str = f"{rmse_val:.4f}" if not np.isnan(rmse_val) else "n/a"
+                ax.set_title(f"{label}  (RMSE = {rmse_str})", fontsize=9)
+                ax.tick_params(labelsize=7)
+                ax.set_xlim(lo - margin, hi + margin)
+                ax.set_ylim(lo - margin, hi + margin)
+
+            fig.tight_layout()
+            plot_path = os.path.join(output_dir, f"perl_scatter_{target}.png")
+            fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            elements.append(_proportional_image(plot_path, max_width=160 * mm))
+            elements.append(Spacer(1, 10))
+        except Exception as exc:
+            plt.close("all")
+            elements.append(Paragraph(f"Could not generate plot for {target}: {exc}", styles["CustomBody"]))

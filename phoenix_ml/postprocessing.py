@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
+from tqdm import tqdm
 from scipy.stats import skew, kurtosis, anderson, probplot, norm, boxcox
 from sklearn.model_selection import (
     KFold, RepeatedKFold, GroupKFold, LeaveOneOut, LeavePOut, ShuffleSplit
@@ -59,15 +60,38 @@ metrics_dict = {
 cv_methods = {
     "K-Fold": KFold,
     "Repeated K-Fold": RepeatedKFold,
-    "Group K-Fold": GroupKFold,
     "LOO": LeaveOneOut,
     "LpO": LeavePOut,
     "Shuffle Split": ShuffleSplit,
 }
 
+# Parameters accepted by each CV method (used to filter the generic cv_args dict)
+_CV_VALID_PARAMS = {
+    "K-Fold":          {"n_splits", "shuffle", "random_state"},
+    "Repeated K-Fold": {"n_splits", "n_repeats", "random_state"},
+    "LOO":             set(),
+    "LpO":             {"p"},
+    "Shuffle Split":   {"n_splits", "test_size", "random_state"},
+}
+
+def _build_cv(cv_method: str, cv_args: dict):
+    """Construct the appropriate CV splitter, stripping incompatible kwargs."""
+    args = cv_args or {}
+    if cv_method == "LOO":
+        return LeaveOneOut()
+    if cv_method == "LpO":
+        p = int(args.get("p", args.get("n_splits", 2)))
+        return LeavePOut(p=p)
+    valid = _CV_VALID_PARAMS.get(cv_method, set())
+    filtered = {k: v for k, v in args.items() if k in valid}
+    # KFold only uses random_state when shuffle is enabled
+    if cv_method == "K-Fold" and "random_state" in filtered:
+        filtered["shuffle"] = True
+    return cv_methods[cv_method](**filtered)
+
 # Run cross_val_score with a scikit-learn splitter and return summary stats.
 def perform_cross_validation_with_summary(model, X_train, y_train, target_var, cv_method, cv_args, scoring_metric, verbose: bool = False):
-    cv = cv_methods[cv_method](**cv_args) if cv_args else cv_methods[cv_method]()
+    cv = _build_cv(cv_method, cv_args)
     scoring_map = {
         "MSE": "neg_mean_squared_error",
         "MAE": "neg_mean_absolute_error",
@@ -82,8 +106,11 @@ def perform_cross_validation_with_summary(model, X_train, y_train, target_var, c
             y_pred = estimator.predict(X)
             n, p = X.shape
             if scoring_metric == "Q^2":
-                return 1 - np.sum((y - y_pred)**2) / np.sum((y - np.mean(y))**2)
+                denom = np.sum((y - np.mean(y))**2)
+                return 1 - np.sum((y - y_pred)**2) / denom if denom > 0 else 0.0
             else:
+                if n <= p + 1:  # guard against divide-by-zero (e.g. LOO with many features)
+                    return float("nan")
                 r2 = r2_score(y, y_pred)
                 return 1 - (1 - r2) * (n - 1) / (n - p - 1)
         scoring = custom_scorer
@@ -272,13 +299,16 @@ def plot_all_transformations(results_df, best_models, X_train, X_test, y_train, 
         ax_q[plot_idx].legend()
         ax_q[plot_idx].grid(True)
 
-    plt.tight_layout()
+    fig_r.tight_layout()
+    fig_h.tight_layout()
+    fig_q.tight_layout()
     return fig_r, fig_h, fig_q
 
 # Run cross-validation summary for each target with its best model.
 def process_all_targets_with_summary(best_models, X_train, y_train, cv_method, cv_args, scoring_metric):
     summary = {}
-    for target, row in best_models.items():
+    for target, row in tqdm(best_models.items(), desc="Cross-Validation", unit="target", leave=False):
+        tqdm.write(f"  CV for target: {target}")
         model_name = _get_model_name(row)
         params = process_hyperparameters(_get_hyperparams(row), model_name)
         model = reset_model_to_defaults(model_name)
@@ -387,6 +417,7 @@ def run_postprocessing_analysis(
 
     return {
         "cv_summary_df": cv_summary_df,
+        "scoring_metric": scoring_metric,
         "transformation_df": transformation_results_df,
         "cooks_fig": cooks_fig if show_cooks_distance else None,
         "residuals_fig": residuals_fig if show_residuals else None,

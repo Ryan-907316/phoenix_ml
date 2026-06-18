@@ -2,12 +2,8 @@
 # This module is the control panel of the workflow, essentially.
 # Here you can change settings in the workflow to your choosing, and are free to add or remove sections as well.
 
-# Additional information about the workflow:
-# Name of developer: Ryan Cheung
-# This workflow was designed as part of a 3rd year individual dissertation project, titled "Developing a Python workflow to aid in Physics-Enhanced Machine Learning applications in engineering."
-# Since then, additional work has been done to make the workflow as easier to use and contains more features, such as better UQ visualisation and the addition of a report.
-# For more information, refer to my GitHub page: https://github.com/Ryan-907316 as well as the instructions to use this workflow and documentation.
-# University email address is cheungkh@lancaster.ac.uk for a request of my dissertation, as well as other resources produced as a result of this workflow/advice.
+# Developer: Ryan Cheung (cheungkh@lancaster.ac.uk)
+# GitHub: https://github.com/Ryan-907316/phoenix_ml
 
 
 # Imports
@@ -20,21 +16,21 @@ from phoenix_ml.workflow import run_workflow
 # IMPORTANT: Ensure your dataset is saved as a .csv file. Otherwise you will get a UnicodeDecodeError.
 # I would also suggest copying these as paths and pasting the raw string.
 BASE_OUTPUT_DIR = "Results"
-DATASET_PATH = "examples/DC_Motor_Dataset.csv"
+DATASET_PATH = str(Path(__file__).parent / "examples" / "Original Datasets" / "DC_Motor_Dataset.csv")
 
 TARGETS = ["Motor Speed", "Armature Current"]
 
 SELECTED_MODELS = [
-    "SVR (RBF)",
-    "Random Forest Regressor",
-    "Gaussian Process Regressor",
+#    "SVR (RBF)",
+#    "Random Forest Regressor",
+#    "Gaussian Process Regressor",
     "XGBoost Regressor",
     "HistGradientBoosting Regressor",
-    "LGBM Regressor",
-    "Bagging Regressor",
-    "MLP Regressor",
-    "KNeighbors Regressor",
-    "Extra Trees Regressor",
+#    "LGBM Regressor",
+#    "Bagging Regressor",
+#    "MLP Regressor",
+#    "KNeighbors Regressor",
+#    "Extra Trees Regressor",
 ] # To remove certain models, simply comment them out or remove them entirely.
 
 # Preprocessing
@@ -49,6 +45,7 @@ UQ_SETTINGS = dict(
     confidence_interval=95,
     calibration_frac=0.05,
     subsample_test_size=50,
+    n_jobs=1,
 )
 
 # Interpretability 
@@ -60,15 +57,27 @@ INTERP_SETTINGS = {
     "grid_resolution": 10,
 }
 
-# Hyperparameter Optimisation (HPO) 
+# Hyperparameter Optimisation (HPO)
 HPO_METRIC = "Q^2"                 # Options: "MSE", "R^2", "ADJUSTED R^2", or "Q^2"
 METHODS_TO_RUN = ["random", "hyperopt", "skopt"]
 SAMPLING_METHOD = "Sobol"          # Options: "Random", "Sobol", "Halton", or "Latin Hypercube"
-N_ITER = 100
+N_ITER = 2500
 SAMPLE_SIZE = 1000
-EVALS = 10
-CALLS = 10
+EVALS = 50
+CALLS = 50
 N_JOBS = -1
+
+# Early Stopping for HPO
+# patience: stop after this many consecutive iterations with no improvement.
+# min_delta: minimum improvement in the HPO metric that counts as progress.
+# Set patience=None for any method to disable early stopping for that method.
+# Rule of thumb: ~8-10% of budget for random search (random samples need slack),
+#                ~20% of budget for hyperopt/skopt (guided, so stagnation is a real signal).
+EARLY_STOPPING = {
+    "random_search": {"patience": 250, "min_delta": 1e-4},
+    "hyperopt":      {"patience": 10,  "min_delta": 1e-4},
+    "skopt":         {"patience": 10,  "min_delta": 1e-4},
+}
 
 # Cross-Validation / Postprocessing
 CV_METHOD = "Shuffle Split"        # Options: "K-Fold", "Repeated K-Fold", "Group K-Fold", "LOO", "LpO", or "Shuffle Split"
@@ -134,6 +143,7 @@ def main():
         evals=EVALS,
         calls=CALLS,
         n_jobs=N_JOBS,
+        early_stopping=EARLY_STOPPING,
 
         # UQ
         uq_settings=UQ_SETTINGS,

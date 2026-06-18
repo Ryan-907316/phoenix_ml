@@ -1,51 +1,83 @@
 [build-system]
-requires = ["setuptools>=75.0, <82", "wheel"]
+requires = ["setuptools>=75.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "phoenix_ml_workflow"
-version = "1.0.1"
+version = "1.1.0"
 authors = [
-    {name = "[Ryan Cheung]", email = "cheungkh@lancaster.ac.uk"}
+    {name = "Ryan Cheung", email = "cheungkh@lancaster.ac.uk"}
 ]
 description = "A workflow designed for Physics-Enhanced Machine Learning in engineering applications."
 readme = "README.md"
-requires-python = ">=3.12.6"
-license = { text = "MIT" }
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+    "machine learning",
+    "physics-enhanced machine learning",
+    "PEML",
+    "hyperparameter optimisation",
+    "uncertainty quantification",
+    "interpretability",
+    "SHAP",
+    "partial dependence plots",
+    "engineering",
+    "regression",
+]
 
 dependencies = [
-    "numpy == 1.26.4",
-    "pandas == 2.2.3",
-    "scipy == 1.14.1",
-    "scikit-learn == 1.5.2",
-    "matplotlib == 3.9.2",
-    "seaborn == 0.13.2",
-    "joblib == 1.4.2",
-    "tqdm == 4.66.5",
-    "tabulate == 0.9.0",
-    "statsmodels == 0.14.4",
-    "scikit-optimize == 0.10.2",
-    "hyperopt == 0.2.7",
-    "dcor == 0.6",
-    "shap == 0.46.0",
-    "reportlab == 4.4.3",
-    "psutil == 6.1.0",
-    "py-cpuinfo == 9.0.0",
-    "xgboost == 2.1.2",
-    "lightgbm == 4.5.0",
-    "pywin32 == 308; platform_system=='Windows'"
+    "numpy >= 1.26.4",
+    "pandas >= 2.2.3",
+    "scipy >= 1.14.1",
+    "scikit-learn >= 1.5.2",
+    "matplotlib >= 3.9.2",
+    "seaborn >= 0.13.2",
+    "joblib >= 1.4.2",
+    "tqdm >= 4.66.5",
+    "tabulate >= 0.9.0",
+    "statsmodels >= 0.14.4",
+    "scikit-optimize >= 0.10.2",
+    "hyperopt >= 0.2.7",
+    "dcor >= 0.6",
+    "shap >= 0.46.0",
+    "reportlab >= 4.4.3",
+    "Pillow >= 10.0.0",
+    "customtkinter >= 5.2.2",
+    "psutil >= 6.1.0",
+    "py-cpuinfo >= 9.0.0",
+    "xgboost >= 2.1.2",
+    "lightgbm >= 4.5.0",
+    "pywin32 >= 308; platform_system=='Windows'",
 ]
 
 classifiers = [
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3 :: Only",
-  "Operating System :: OS Independent",
-  "Intended Audience :: Science/Research",
-  "Topic :: Scientific/Engineering :: Artificial Intelligence"
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Physics",
 ]
+
+[project.scripts]
+phoenix-ml = "phoenix_ml.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Ryan-907316/phoenix_ml"
+"Bug Tracker" = "https://github.com/Ryan-907316/phoenix_ml/issues"
+Source = "https://github.com/Ryan-907316/phoenix_ml"
 
 [tool.setuptools]
-license-files = []
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["phoenix_ml*"]

@@ -19,8 +19,10 @@ This file ties together every modular component of the workflow:
 # This function is intended to be the *only* public entry point for users. All internal modules (preprocessing, HPO, UQ, etc.) are handled automatically behind the scenes.
 
 from __future__ import annotations
+import copy
 import os, time
 from datetime import datetime
+from tqdm import tqdm
 
 from phoenix_ml.models import models_dict as ALL_MODELS
 from phoenix_ml.model_training import run_model_training_workflow, metrics_dict, reset_model_to_defaults
@@ -35,6 +37,7 @@ from phoenix_ml.hyperparameter_optimisation import (
     process_hyperparameters,
 )
 from phoenix_ml.postprocessing import run_postprocessing_analysis
+from phoenix_ml.pareto_analysis import run_pareto_analysis, save_pareto_plots
 from phoenix_ml.system_info import SystemInfo
 from phoenix_ml.persistence import (
     build_and_fit_best_models,
@@ -64,6 +67,8 @@ def run_workflow(
     test_size: float = 0.2,
     split_method: str = "last",
     show_preproc_plots: bool = True,
+    dist_corr_dummy: bool = True,
+    dist_corr_mp: bool = False,
 
     # Interpretability
     interpretability_settings: dict | None = None,
@@ -77,6 +82,7 @@ def run_workflow(
     evals: int = 10,
     calls: int = 10,
     n_jobs: int = -1,
+    early_stopping: dict | None = None,
 
     # UQ
     uq_settings: dict | None = None,
@@ -95,11 +101,29 @@ def run_workflow(
     csv_path = os.path.join(report_dir, f"Hyperparameter Optimisation Results {timestamp}.csv")
     pdf_path = os.path.join(report_dir, "Phoenix_ML Report.pdf")
 
+    # Build the ordered list of active steps for the progress header
+    _steps = ["Preprocessing", "Baseline Training"]
+    if perform_uq:               _steps.append("UQ (Before HPO)")
+    if perform_interpretability: _steps.append("Interpretability")
+    if perform_hpo:              _steps.append("Hyperparameter Optimisation")
+    if perform_cv:               _steps.append("Postprocessing & CV")
+    if perform_uq:               _steps.append("UQ (After HPO)")
+    _steps.append("Report Generation")
+    _total = len(_steps)
+    _counter = {"n": 0}
+
+    def _announce(name):
+        _counter["n"] += 1
+        tqdm.write(f"\n{'-' * 60}")
+        tqdm.write(f"  [{_counter['n']}/{_total}] {name}")
+        tqdm.write(f"{'-' * 60}")
+
     # System info
     start_time = time.time()
     sysinfo = SystemInfo(); sysinfo.gather(); sysinfo.display()
 
     # Preprocessing
+    _announce("Preprocessing")
     results = run_preprocessing_workflow(
         file_path=dataset_path,
         test_size=test_size,
@@ -109,10 +133,13 @@ def run_workflow(
         plot_features_vs_targets_enabled=show_preproc_plots,
         plot_boxplots_enabled=show_preproc_plots,
         plot_distance_corr_enabled=show_preproc_plots,
+        dist_corr_dummy=dist_corr_dummy,
+        dist_corr_mp=dist_corr_mp,
     )
 
     # Baseline training
-    selected = {name: ALL_MODELS[name] for name in selected_models}
+    _announce("Baseline Training")
+    selected = {name: copy.deepcopy(ALL_MODELS[name]) for name in selected_models}
     selected_metrics = {k: metrics_dict[k] for k in ["MSE", "R^2", "ADJUSTED R^2", "Q^2"]}
 
     results_df, default_metrics, default_params, _ = run_model_training_workflow(
@@ -130,8 +157,9 @@ def run_workflow(
     # UQ before HPO
     uq_df_before, uq_figures_before = None, None
     if perform_uq:
+        _announce("UQ (Before HPO)")
         uq_settings = uq_settings or dict(uq_method="Both", n_bootstrap=5, confidence_interval=95,
-                                        calibration_frac=0.05, subsample_test_size=50)
+                                        calibration_frac=0.05, subsample_test_size=50, n_jobs=1)
         uq_df_before, uq_figures_before = run_uncertainty_quantification(
             models_dict=selected,
             X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
@@ -143,6 +171,7 @@ def run_workflow(
     # Interpretability
     interpretability_figures = None
     if perform_interpretability:
+        _announce("Interpretability")
         interpretability_settings = interpretability_settings or dict(
             preferred_model_name="XGBoost Regressor",
             test_sample_size=1000, background_sample_size=10,
@@ -158,6 +187,7 @@ def run_workflow(
     # HPO
     hpo_metrics, hpo_params, hpo_times, hpo_plots = {}, {}, {}, {}
     if perform_hpo:
+        _announce("Hyperparameter Optimisation")
         hpo_metrics, hpo_params, hpo_times, hpo_plots = run_all_models_optimisation(
             models_dict=selected,
             selected_model_names=selected_models,
@@ -174,6 +204,7 @@ def run_workflow(
             n_jobs=n_jobs,
             plot=True,
             output_dir=images_dir,
+            early_stopping=early_stopping,
         )
         metrics.update(hpo_metrics)
         params.update(hpo_params)
@@ -194,7 +225,8 @@ def run_workflow(
     # Postprocessing (CV, residuals, transforms)
     post_results = None
     if perform_cv:
-        cv_args = cv_args or {"n_splits": 10, "test_size": 0.2, "random_state": 0}
+        _announce("Postprocessing & CV")
+        cv_args = cv_args if cv_args is not None else {"n_splits": 10, "test_size": 0.2, "random_state": 0}
         post_results = run_postprocessing_analysis(
             best_models=best_models_per_target,
             X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
@@ -207,6 +239,7 @@ def run_workflow(
     # UQ after HPO
     uq_df_after, uq_figures_after = None, None
     if perform_uq:
+        _announce("UQ (After HPO)")
         best_model_instances = get_best_models_by_method_across_targets(
             selected_models, targets, metrics, params, hpo_metric, selected
         )
@@ -214,7 +247,7 @@ def run_workflow(
             models_dict=best_model_instances,
             X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
             y_train=results["y_train"], y_test=results["y_test"],
-            target_columns=targets, model_names_to_run=selected_models,
+            target_columns=targets, model_names_to_run=list(best_model_instances.keys()),
             stage_label="After HPO", show_plots=True, **uq_settings
     )
 
@@ -246,6 +279,7 @@ def run_workflow(
     )
 
     # Report
+    _announce("Report Generation")
     doc, elements, styles, filepath = init_pdf_report(
         filename=os.path.basename(pdf_path), output_dir=report_dir,
         title="Phoenix_ML: Report", font_name="Helvetica",
@@ -253,7 +287,8 @@ def run_workflow(
     )
     add_system_info_to_pdf(elements, styles)
     plot_paths = save_preprocessing_plots(results, output_dir=images_dir)
-    add_preprocessing_section(elements, results, plot_paths, dataset_path, styles)
+    add_preprocessing_section(elements, results, plot_paths, dataset_path, styles,
+                              dist_corr_dummy=dist_corr_dummy, dist_corr_mp=dist_corr_mp)
     interpretability_settings = interpretability_settings or {}
     add_model_selection_section(
     elements, styles,
@@ -271,8 +306,21 @@ def run_workflow(
         add_hpo_summary_section(
             elements, styles, hpo_metrics, hpo_params, hpo_times, hpo_plots,
             list(methods_to_run), hpo_metric, sampling_method, sample_size, n_iter, evals, calls, n_jobs,
-            csv_path, best_models_per_target, output_dir=images_dir
+            csv_path, best_models_per_target, output_dir=images_dir,
+            early_stopping=early_stopping,
         )
+
+    if len(selected_models) >= 2:
+        pareto_figs = run_pareto_analysis(
+            session_metrics=metrics,  # contains default + all HPO method results
+            target_columns=list(targets),
+            perf_metric=hpo_metric,
+            selected_models=selected_models,
+        )
+        if pareto_figs:
+            pareto_paths = save_pareto_plots(pareto_figs, output_dir=images_dir)
+            add_pareto_section(elements, styles, pareto_paths, perf_metric=hpo_metric)
+
     if perform_cv and post_results is not None:
         add_postprocessing_section(elements, styles, postprocessing_results=post_results, image_output_dir=images_dir)
     if perform_uq and uq_df_after is not None:
