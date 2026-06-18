@@ -77,6 +77,7 @@ Source = "https://github.com/Ryan-907316/phoenix_ml"
 
 [tool.setuptools]
 include-package-data = true
+license-files = []
 
 [tool.setuptools.packages.find]
 where = ["."]
