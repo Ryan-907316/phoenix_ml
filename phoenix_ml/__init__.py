@@ -26,7 +26,7 @@ Run the full workflow from Python::
     )
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 from phoenix_ml.workflow import run_workflow  # noqa: F401
 

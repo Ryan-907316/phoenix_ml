@@ -4,15 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phoenix_ml_workflow"
-version = "1.1.0"
+version = "1.1.1"
 authors = [
     {name = "Ryan Cheung", email = "cheungkh@lancaster.ac.uk"}
 ]
 description = "A workflow designed for Physics-Enhanced Machine Learning in engineering applications."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
-license-files = ["LICENSE"]
+license = { text = "MIT" }
 keywords = [
     "machine learning",
     "physics-enhanced machine learning",
@@ -49,6 +48,7 @@ dependencies = [
     "xgboost >= 2.1.2",
     "lightgbm >= 4.5.0",
     "pywin32 >= 308; platform_system=='Windows'",
+    "setuptools < 80",
 ]
 
 classifiers = [
@@ -77,7 +77,11 @@ Source = "https://github.com/Ryan-907316/phoenix_ml"
 
 [tool.setuptools]
 include-package-data = true
+license-files = []
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["phoenix_ml*"]
+
+[tool.setuptools.package-data]
+phoenix_ml = ["*.json", "examples/*", "examples/**/*"]

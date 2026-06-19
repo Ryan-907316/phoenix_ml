@@ -16,9 +16,18 @@ from tqdm import tqdm
 from joblib import Parallel, delayed
 from sklearn.utils import resample
 from sklearn.metrics import mean_squared_error, r2_score
-from skopt import gp_minimize
-from skopt.space import Real, Integer, Categorical
-from hyperopt import fmin, tpe, hp, Trials, STATUS_OK
+try:
+    from skopt import gp_minimize
+    from skopt.space import Real, Integer, Categorical
+    _SKOPT_AVAILABLE = True
+except Exception:
+    _SKOPT_AVAILABLE = False
+
+try:
+    from hyperopt import fmin, tpe, hp, Trials, STATUS_OK
+    _HYPEROPT_AVAILABLE = True
+except Exception:
+    _HYPEROPT_AVAILABLE = False
 from scipy.stats.qmc import Sobol, Halton, LatinHypercube
 
 from phoenix_ml.models import param_spaces
@@ -345,6 +354,11 @@ def convert_to_hyperopt_space(param_space):
 # This is used to plot convergence later.
 def run_hyperopt_optimisation(model_name, model, param_space, evals, X_train, X_test, y_train, y_test, target_var, metric, sample_size,
                               patience=None, min_delta=1e-4):
+    if not _HYPEROPT_AVAILABLE:
+        raise ImportError(
+            "hyperopt could not be imported (likely due to a missing pkg_resources). "
+            "Fix: pip install \"setuptools<80\""
+        )
     start_time = time.time()
     trials = Trials()
     tracking_lists = tracking()  # Tracking best parameters and metric
@@ -488,6 +502,8 @@ def skopt_objective(params, model_name, model, X_train, X_test, y_train, y_test,
     # After optimisation, extract best params and best metric value.
 def run_skopt_optimisation(model_name, model, param_space, calls, X_train, X_test, y_train, y_test, target_var, metric, sample_size, n_jobs,
                            patience=None, min_delta=1e-4):
+    if not _SKOPT_AVAILABLE:
+        raise ImportError("scikit-optimize could not be imported.")
     start_time = time.time()
     tracking_lists = tracking()
 

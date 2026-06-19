@@ -1,16 +1,28 @@
 # cli.py
 # Console-script entry point: called when the user runs `phoenix-ml` after pip install.
-# Contains the same splash + launch logic as app.py so that both routes work identically.
-
-import matplotlib
-matplotlib.use('Agg')  # must be set before any other matplotlib/phoenix_ml imports
 
 import sys
-import warnings
-warnings.filterwarnings("ignore")
+import argparse
+from pathlib import Path
 
-from phoenix_ml.system_info import SystemInfo
-from phoenix_ml.ui import launch
+
+def _get_examples():
+    import shutil
+    src = Path(__file__).parent / "examples"
+    dst = Path.cwd() / "examples"
+    if dst.exists():
+        print(f"  'examples' folder already exists at:\n  {dst}")
+        print("  Delete or rename it first if you want a fresh copy.")
+    else:
+        shutil.copytree(src, dst)
+        print(f"  Examples copied to:\n  {dst}")
+        print()
+        print("  Datasets are in:  examples/Original Datasets/")
+        print("  To generate the DC motor dataset manually, run:")
+        print("    python examples/DC_Motors_Dataset_Generation.py")
+        print()
+        print("  Open phoenix-ml and point the Dataset Path at one of those CSV files.")
+
 
 _BOLD_ON  = "\x1b[1m"
 _BOLD_OFF = "\x1b[0m"
@@ -27,6 +39,30 @@ def _bold_letters(text: str, letters: str, case_insensitive: bool = True) -> str
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="phoenix-ml",
+        description="Phoenix ML — Physics-Enhanced Machine Learning workflow.",
+        add_help=True,
+    )
+    parser.add_argument(
+        "--get-examples",
+        action="store_true",
+        help="Copy the bundled example datasets to the current directory and exit.",
+    )
+    args, _ = parser.parse_known_args()
+
+    if args.get_examples:
+        _get_examples()
+        return
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import warnings
+    warnings.filterwarnings("ignore")
+
+    from phoenix_ml.system_info import SystemInfo
+    from phoenix_ml.ui import launch
+
     si = SystemInfo()
     si.gather()
 
