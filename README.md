@@ -100,7 +100,7 @@ Make sure to run `phoenix-ml --get-examples` first (or clone the repository) so 
 
 ## Future Work
 
-### Near-term
+### Short-term
 - **User documentation**: Proper guides and tutorials covering machine learning concepts (HPO, interpretability, UQ) and how to get the most out of each step of the workflow.
 - **Advanced model selection**: More regression models, and the ability to choose which hyperparameters to optimise and customise their search spaces directly from the UI.
 - **Classification support**: Extending the workflow to classification problems, including appropriate metrics (accuracy, F1, AUC-ROC etc), confusion matrices, and report sections.
