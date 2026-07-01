@@ -100,17 +100,7 @@ Make sure to run `phoenix-ml --get-examples` first (or clone the repository) so 
 
 ## Future Work
 
-### Short-term
-- **Expanded interpretability methods**: Accumulated Local Effects (ALE) plots as a statistically robust alternative to PDPs for datasets with correlated features, Leave One Feature Out (LOFO) importance as a model-agnostic complement to SHAP for feature validation and sensor selection, and per-method checkboxes in the UI so users can enable only the analyses relevant to their problem.
-- **Global sensitivity analysis**: Sobol variance-based indices and Morris elementary-effects screening (SALib) for quantifying which inputs drive output variance and through what interactions: the standard sensitivity analysis toolkit in engineering and a complement to SHAP that addresses different questions.
-- **Advanced conformal prediction**: Jackknife+, CV+, and conformalized quantile regression (CQR) via MAPIE, extending the current split-conformal implementation to provide adaptive interval widths for heteroscedastic data and stronger distribution-free coverage guarantees.
-- **Optuna HPO backend**: TPE, CMA-ES, Gaussian Process Bayesian optimisation, and NSGA-II/III multi-objective search in a single well-maintained pure-Python framework, extending and partially replacing the current scikit-optimize backend.
-- **Multi-objective HPO**: Optimising across multiple metrics simultaneously (predictive performance vs. model complexity vs. training time) using Pareto-optimal selection, turning the existing post-hoc Pareto analysis into an active multi-objective optimiser via Optuna's NSGA-II/III samplers.
-- **Extended regression diagnostics**: VIF and condition number for multicollinearity (preprocessing), PRESS statistic and predicted R², full leverage and influence suite (DFFITS, studentised residuals), Breusch-Pagan/White heteroscedasticity tests, and Durbin-Watson/Ljung-Box autocorrelation tests, all using the existing statsmodels dependency.
-- **Monotonicity and shape constraints**: Exposing the per-feature monotonicity constraints already supported by XGBoost, LightGBM, and HistGradientBoostingRegressor via a UI control, allowing physically-motivated constraints (e.g. drag increasing with velocity, wear increasing with time) to guide model training and improve extrapolation.
-- **Expanded evaluation metrics**: NRMSE, MAPE, KGE (Kling-Gupta Efficiency), PICP, MPIW, and other engineering-standard metrics alongside the existing MSE/R²/Adjusted R²/Q².
-- **Outlier detection**: IsolationForest, Local Outlier Factor, and Minimum Covariance Determinant as optional preprocessing steps, complementing the existing IQR/Z-score methods in dataset cleaning.
-- **Model documentation**: Auto-generated model cards from the existing metadata JSON, structured to document intended use, data provenance, metrics, and known limitations.
+### Near-term
 - **User documentation**: Proper guides and tutorials covering machine learning concepts (HPO, interpretability, UQ) and how to get the most out of each step of the workflow.
 - **Advanced model selection**: More regression models, and the ability to choose which hyperparameters to optimise and customise their search spaces directly from the UI.
 - **Classification support**: Extending the workflow to classification problems, including appropriate metrics (accuracy, F1, AUC-ROC etc), confusion matrices, and report sections.
