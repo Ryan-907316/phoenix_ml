@@ -22,6 +22,7 @@ from __future__ import annotations
 import copy
 import os, time
 from datetime import datetime
+import pandas as pd
 from tqdm import tqdm
 
 from phoenix_ml.models import models_dict as ALL_MODELS
@@ -66,6 +67,8 @@ def run_workflow(
     # Preprocessing
     test_size: float = 0.2,
     split_method: str = "last",
+    split_random_state: int | None = None,
+    scaler_type: str = "Standard",
     show_preproc_plots: bool = True,
     dist_corr_dummy: bool = True,
     dist_corr_mp: bool = False,
@@ -79,8 +82,8 @@ def run_workflow(
     sampling_method: str = "Sobol",
     n_iter: int = 100,
     sample_size: int = 1000,
-    evals: int = 10,
-    calls: int = 10,
+    evals: int = 50,
+    calls: int = 50,
     n_jobs: int = -1,
     early_stopping: dict | None = None,
 
@@ -97,8 +100,6 @@ def run_workflow(
     images_dir = _ensure_dir(os.path.join(report_dir, "Images"))
     models_dir = _ensure_dir(os.path.join(output_dir, "Models"))
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H%M%S")
-    csv_path = os.path.join(report_dir, f"Hyperparameter Optimisation Results {timestamp}.csv")
     pdf_path = os.path.join(report_dir, "Phoenix_ML Report.pdf")
 
     # Build the ordered list of active steps for the progress header
@@ -128,6 +129,8 @@ def run_workflow(
         file_path=dataset_path,
         test_size=test_size,
         split_method=split_method,
+        random_state=split_random_state,
+        scaler_type=scaler_type,
         target_columns=targets,
         plot_target_vs_target_enabled=show_preproc_plots,
         plot_features_vs_targets_enabled=show_preproc_plots,
@@ -219,7 +222,6 @@ def run_workflow(
         skopt_metrics=metrics["skopt"],       skopt_params=params["skopt"],
         metric_name=hpo_metric,
     )
-    collected_results_df.to_csv(csv_path, index=False)
     best_models_per_target = find_best_model_and_hyperparams(collected_results_df, metric=hpo_metric)
 
     # Postprocessing (CV, residuals, transforms)
@@ -297,7 +299,7 @@ def run_workflow(
     )
     add_model_training_table_to_report(elements, results_df, styles)
     if perform_uq and uq_df_before is not None:
-        handle_uq_reporting_section(uq_df_before, uq_figures_before, "Before HPO", elements, styles, images_dir, report_dir, uq_settings=uq_settings)
+        handle_uq_reporting_section(uq_df_before, uq_figures_before, "Before HPO", elements, styles, images_dir, uq_settings=uq_settings)
 
     if perform_interpretability and interpretability_figures is not None:
         add_interpretability_section(elements, interpretability_figures, styles, images_dir, interpretability_settings)
@@ -306,7 +308,7 @@ def run_workflow(
         add_hpo_summary_section(
             elements, styles, hpo_metrics, hpo_params, hpo_times, hpo_plots,
             list(methods_to_run), hpo_metric, sampling_method, sample_size, n_iter, evals, calls, n_jobs,
-            csv_path, best_models_per_target, output_dir=images_dir,
+            best_models_per_target, output_dir=images_dir,
             early_stopping=early_stopping,
         )
 
@@ -324,7 +326,7 @@ def run_workflow(
     if perform_cv and post_results is not None:
         add_postprocessing_section(elements, styles, postprocessing_results=post_results, image_output_dir=images_dir)
     if perform_uq and uq_df_after is not None:
-        handle_uq_reporting_section(uq_df_after, uq_figures_after, "After HPO", elements, styles, images_dir, report_dir, uq_settings=uq_settings)
+        handle_uq_reporting_section(uq_df_after, uq_figures_after, "After HPO", elements, styles, images_dir, uq_settings=uq_settings)
 
     elapsed = time.time() - start_time
     hhmmss = f"{elapsed//3600:02.0f}:{(elapsed%3600)//60:02.0f}:{elapsed%60:05.2f}"
@@ -332,11 +334,31 @@ def run_workflow(
     elements.append(Paragraph("Execution Summary", styles["CustomHeading"]))
     elements.append(Paragraph(f"The total time elapsed for running the full workflow was: <b>{hhmmss}</b>.", styles["CustomBody"]))
     add_artifacts_section(elements, styles, save_paths, models_dir)
-    doc.build(elements)
+    build_pdf(doc, elements)
+
+    # Excel results export
+    xlsx_path = os.path.join(report_dir, "Phoenix_ML_Results.xlsx")
+    try:
+        summary_rows = [
+            {"Sheet": "HPO Results",   "Contents": "All HPO trial scores and parameters"},
+            {"Sheet": "UQ Before HPO", "Contents": "Uncertainty quantification metrics before HPO"},
+            {"Sheet": "UQ After HPO",  "Contents": "Uncertainty quantification metrics after HPO"},
+        ]
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
+            if collected_results_df is not None and not collected_results_df.empty:
+                collected_results_df.to_excel(writer, sheet_name="HPO Results", index=False)
+            if uq_df_before is not None:
+                uq_df_before.to_excel(writer, sheet_name="UQ Before HPO", index=False)
+            if uq_df_after is not None:
+                uq_df_after.to_excel(writer, sheet_name="UQ After HPO", index=False)
+    except Exception as e:
+        print(f"  Warning: Excel export failed ({e})")
+        xlsx_path = None
 
     return {
-        "csv": csv_path,
         "pdf": pdf_path,
+        "xlsx": xlsx_path,
         "models": save_paths,
         "elapsed_seconds": elapsed,
         "images_dir": images_dir,

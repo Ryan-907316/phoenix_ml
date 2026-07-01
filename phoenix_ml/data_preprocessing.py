@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 
 import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
@@ -15,7 +15,8 @@ import matplotlib.patches as mpatches
 import seaborn as sns
 import dcor
 
-def load_and_preprocess_data(filepath, test_size, split_method="random", target_columns=None):
+def load_and_preprocess_data(filepath, test_size, split_method="random", target_columns=None,
+                            scaler_type="Standard", random_state=None):
     """
     Load a CSV, choose targets, split into train/test by a chosen method, and standardize features.
 
@@ -42,8 +43,9 @@ def load_and_preprocess_data(filepath, test_size, split_method="random", target_
 
     # Split data based on the chosen method
     if split_method.lower() == "random":
-        # Random split using scikit-learn's train_test_split
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_state
+        )
     elif split_method.lower() == "first":
         # Use the first 'test_size' proportion of rows as the test set
         test_count = int(np.ceil(test_size * len(X)))
@@ -61,10 +63,19 @@ def load_and_preprocess_data(filepath, test_size, split_method="random", target_
     else:
         raise ValueError("split_method must be 'random', 'first', or 'last'.")
 
-    # Standardise features (mean = 0, variance = 1)
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    _scalers = {
+        "Standard":  StandardScaler,
+        "MinMax":    MinMaxScaler,
+        "Robust":    RobustScaler,
+    }
+    scaler_cls = _scalers.get(scaler_type, StandardScaler)
+    scaler = scaler_cls() if scaler_cls is not None else None
+    if scaler is not None:
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled  = scaler.transform(X_test)
+    else:
+        X_train_scaled = X_train.values
+        X_test_scaled  = X_test.values
 
     return df, X_train, X_test, y_train, y_test, X_train_scaled, X_test_scaled, scaler, target_columns, feature_names
 
@@ -79,12 +90,12 @@ def plot_target_vs_target(y_train, y_test, target_columns):
     # Scatter plot of target variables
     target1, target2 = target_columns[:2]  # Use first two for now (maybe add more in later versions?)
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.scatter(y_train[target1], y_train[target2], color='black', alpha=0.5, label=f'Training Data (n={len(y_train)})')
-    ax.scatter(y_test[target1], y_test[target2], color='red', alpha=0.5, label=f'Testing Data (n={len(y_test)})')
+    ax.scatter(y_train[target1], y_train[target2], color='black', alpha=0.5, s=10, label=f'Training Data (n={len(y_train)})')
+    ax.scatter(y_test[target1], y_test[target2], color='red', alpha=0.5, s=10, label=f'Testing Data (n={len(y_test)})')
     ax.set_xlabel(target1)
     ax.set_ylabel(target2)
-    ax.set_title(f'Train/Test Split of {target1} vs {target2}')
-    ax.legend()
+    ax.set_title(f'Train/Test Split: {target1} vs {target2}', fontweight='bold')
+    ax.legend(loc='best')
     fig.tight_layout()
     return fig
 
@@ -120,12 +131,13 @@ def plot_features_vs_targets(X_train, y_train, target_columns):
                 squeeze=False,
             )
             part_label = f" (Part {part_idx + 1} of {n_parts})" if n_parts > 1 else ""
-            fig.suptitle(f"Scatter Plots of features against {target_var}{part_label}", fontsize=14)
+            fig.suptitle(f"Scatter Plots of Features Against {target_var}{part_label}",
+                         fontsize=14, fontweight='bold')
             axes_flat = axes.flatten()
 
             for i, column in enumerate(chunk_cols):
                 ax = axes_flat[i]
-                ax.scatter(X_train[column], y_train[target_var], alpha=0.5, s=18)
+                ax.scatter(X_train[column], y_train[target_var], alpha=0.5, s=8)
                 try:
                     slope, intercept = np.polyfit(X_train[column], y_train[target_var], 1)
                     ax.plot(X_train[column], slope * X_train[column] + intercept, color='red')
@@ -175,7 +187,8 @@ def plot_boxplots(df, target_columns):
             squeeze=False,
         )
         part_label = f" (Part {part_idx + 1} of {n_parts})" if n_parts > 1 else ""
-        fig.suptitle(f"Box Plots of Features and Target Variables{part_label}", fontsize=14)
+        fig.suptitle(f"Box Plots of Features and Target Variables{part_label}",
+                     fontsize=14, fontweight='bold')
         axes_flat = axes.flatten()
 
         for i, column in enumerate(chunk_cols):
@@ -309,10 +322,10 @@ def plot_distance_correlation_matrix(df, title="Distance Correlation Matrix", cm
 
     if mp_threshold:
         comp_line = f"MP denoised: {n_signal}/{n} signal components retained"
-        lp_line   = f"λ⁺ = {lp:.3f}"
-        plt.title(f"{_title}\n{comp_line}\n{lp_line}", fontsize=10, pad=12)
+        lp_line   = f"Noise threshold λ⁺ = {lp:.3f}"
+        plt.title(f"{_title}\n{comp_line}\n{lp_line}", fontsize=10, fontweight='bold', pad=12)
     else:
-        plt.title(_title, fontsize=13, pad=8)
+        plt.title(_title, fontsize=13, fontweight='bold', pad=8)
 
     plt.tight_layout()
 
@@ -330,6 +343,8 @@ def run_preprocessing_workflow(
     plot_distance_corr_enabled=True,
     dist_corr_dummy=True,
     dist_corr_mp=False,
+    scaler_type="Standard",
+    random_state=None,
     figures=None,
 ):
     if figures is None:
@@ -347,7 +362,8 @@ def run_preprocessing_workflow(
         X_train_scaled, X_test_scaled, scaler,
         target_columns, feature_names
     ) = load_and_preprocess_data(
-        file_path, test_size=test_size, split_method=split_method, target_columns=target_columns
+        file_path, test_size=test_size, split_method=split_method,
+        target_columns=target_columns, scaler_type=scaler_type, random_state=random_state,
     )
 
     # Dataset metadata for the report
@@ -367,7 +383,7 @@ def run_preprocessing_workflow(
         "test_count": test_n,
         "train_prop": train_n / n_rows if n_rows else 0.0,
         "test_prop": test_n / n_rows if n_rows else 0.0,
-        "scaler_name": type(scaler).__name__,
+        "scaler_name": type(scaler).__name__ if scaler is not None else "None",
     }
 
     print(f"\nDataset has {n_rows} rows and {n_cols} columns.")
@@ -398,9 +414,18 @@ def run_preprocessing_workflow(
     dist_corr_df = None
     if plot_distance_corr_enabled:
         print("\nGenerating Distance Correlation Matrix...")
+        features_df = df.drop(columns=target_columns)
         dist_corr_df, fig = plot_distance_correlation_matrix(
-            df.drop(columns=target_columns), dummy=dist_corr_dummy, mp_threshold=dist_corr_mp)
-        if fig: figures["Distance Correlation"] = fig
+            features_df, dummy=dist_corr_dummy, mp_threshold=False)
+        if fig:
+            figures["Distance Correlation"] = fig
+        if dist_corr_mp:
+            print("  Applying Marchenko-Pastur denoising...")
+            _, fig_mp = plot_distance_correlation_matrix(
+                features_df, dummy=dist_corr_dummy, mp_threshold=True,
+                title="Distance Correlation Matrix (MP Denoised)")
+            if fig_mp:
+                figures["Distance Correlation (MP Denoised)"] = fig_mp
 
     return {
         "df": df,

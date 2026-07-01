@@ -46,6 +46,8 @@ class WorkflowSession:
     # Preprocessing
     test_size: float = 0.2
     split_method: str = "last"
+    split_random_state: int | None = None
+    scaler_type: str = "Standard"
     show_preproc_plots: bool = True
     dist_corr_dummy: bool = True
     dist_corr_mp: bool = False
@@ -87,6 +89,10 @@ class WorkflowSession:
     perl_config_path: str = ""
     perl_results: Any = None
     perl_config: dict | None = None
+    perl_output_df: Any = None
+
+    # Report
+    report_source: str = "ui"
 
     # ── Step outputs ─────────────────────────────────────────────────────────
     preprocessing_results: dict | None = None
@@ -107,7 +113,7 @@ class WorkflowSession:
     # ── Paths ────────────────────────────────────────────────────────────────
     images_dir:  str | None = None
     report_dir:  str | None = None
-    csv_path:    str | None = None
+    xlsx_path:   str | None = None
     pdf_path:    str | None = None
     models_dir:  str | None = None
 
@@ -124,7 +130,6 @@ class WorkflowSession:
         self.report_dir  = rdir
         self.images_dir  = _ensure_dir(os.path.join(rdir, "Images"))
         self.models_dir  = _ensure_dir(os.path.join(self.output_dir, "Models"))
-        self.csv_path    = os.path.join(rdir, f"HPO Results {ts}.csv")
         self.pdf_path    = os.path.join(rdir, "Phoenix_ML Report.pdf")
 
     # ── Prerequisites ────────────────────────────────────────────────────────
@@ -154,6 +159,8 @@ def run_step_preprocessing(session: WorkflowSession) -> None:
         plot_distance_corr_enabled=session.show_preproc_plots,
         dist_corr_dummy=session.dist_corr_dummy,
         dist_corr_mp=session.dist_corr_mp,
+        scaler_type=session.scaler_type,
+        random_state=session.split_random_state,
     )
 
 
@@ -229,9 +236,6 @@ def run_step_hpo(session: WorkflowSession) -> None:
         skopt_metrics=session.metrics["skopt"],       skopt_params=session.params["skopt"],
         metric_name=session.hpo_metric,
     )
-    if session.csv_path:
-        collected.to_csv(session.csv_path, index=False)
-
     session.hpo_results = {
         "hpo_metrics": hpo_m, "hpo_params": hpo_p,
         "hpo_times": hpo_t,   "hpo_plots": hpo_pl,
@@ -342,7 +346,7 @@ def run_step_report(session: WorkflowSession) -> None:
     doc, elements, styles, _ = init_pdf_report(
         filename=os.path.basename(session.pdf_path),
         output_dir=session.report_dir,
-        title="Phoenix_ML: Report", font_name="Helvetica",
+        title="phoenix_ml: Summary Report", font_name="Helvetica",
         font_size=10, title_font_size=20, heading_font_size=14,
     )
     add_system_info_to_pdf(elements, styles)
@@ -360,7 +364,7 @@ def run_step_report(session: WorkflowSession) -> None:
     if session.uq_before is not None:
         uq_df, uq_figs = session.uq_before
         handle_uq_reporting_section(uq_df, uq_figs, "Before HPO", elements, styles,
-                                    session.images_dir, session.report_dir,
+                                    session.images_dir,
                                     uq_settings=session.uq_settings)
 
     if session.interpretability_figures is not None:
@@ -373,7 +377,7 @@ def run_step_report(session: WorkflowSession) -> None:
             hr["hpo_metrics"], hr["hpo_params"], hr["hpo_times"], hr["hpo_plots"],
             list(session.methods_to_run), session.hpo_metric, session.sampling_method,
             session.sample_size, session.n_iter, session.evals, session.calls, session.n_jobs,
-            session.csv_path, hr["best_models_per_target"],
+            hr["best_models_per_target"],
             output_dir=session.images_dir,
             early_stopping=session.early_stopping,
         )
@@ -398,7 +402,7 @@ def run_step_report(session: WorkflowSession) -> None:
     if session.uq_after is not None:
         uq_df, uq_figs = session.uq_after
         handle_uq_reporting_section(uq_df, uq_figs, "After HPO", elements, styles,
-                                    session.images_dir, session.report_dir,
+                                    session.images_dir,
                                     uq_settings=session.uq_settings)
 
     if session.perl_results and session.perl_config:
@@ -408,13 +412,19 @@ def run_step_report(session: WorkflowSession) -> None:
                          output_dir=session.images_dir)
 
     elements.append(Spacer(1, 24))
-    elements.append(Paragraph("Report generated via Phoenix ML UI.", styles["CustomBody"]))
     if session.total_elapsed > 0:
-        mins, secs = divmod(session.total_elapsed, 60)
-        if mins >= 1:
-            time_str = f"{int(mins)}m {secs:.1f}s"
+        total = session.total_elapsed
+        if total >= 86400:
+            d, r2 = divmod(total, 86400); h, r2 = divmod(r2, 3600); m, s = divmod(r2, 60)
+            time_str = f"{int(d)}d {int(h)}h {int(m)}m {s:.1f}s"
+        elif total >= 3600:
+            h, r2 = divmod(total, 3600); m, s = divmod(r2, 60)
+            time_str = f"{int(h)}h {int(m)}m {s:.1f}s"
+        elif total >= 60:
+            m, s = divmod(total, 60)
+            time_str = f"{int(m)}m {s:.1f}s"
         else:
-            time_str = f"{secs:.1f}s"
+            time_str = f"{total:.1f}s"
         elements.append(Spacer(1, 6))
         elements.append(Paragraph(
             f"Total workflow computation time: <b>{time_str}</b>",
@@ -423,8 +433,36 @@ def run_step_report(session: WorkflowSession) -> None:
     if save_paths:
         add_artifacts_section(elements, styles, save_paths, session.models_dir)
 
-    doc.build(elements)
+    build_pdf(doc, elements)
     print(f"\nReport saved to: {session.pdf_path}")
+
+    # ── Excel multi-sheet results export ──────────────────────────────────────
+    try:
+        xlsx_path = os.path.join(session.report_dir, "Phoenix_ML_Results.xlsx")
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            summary_rows = [
+                {"Sheet": "HPO Results",          "Contents": "All HPO trial scores and parameters"},
+                {"Sheet": "UQ Before HPO",         "Contents": "Uncertainty quantification metrics before HPO"},
+                {"Sheet": "UQ After HPO",          "Contents": "Uncertainty quantification metrics after HPO"},
+                {"Sheet": "PERL Reconstruction",   "Contents": "PERL reconstruction output with physics, ML, and combined predictions"},
+            ]
+            pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False)
+            if hr and "collected_df" in hr and not hr["collected_df"].empty:
+                hr["collected_df"].to_excel(writer, sheet_name="HPO Results", index=False)
+            if session.uq_before is not None:
+                uq_before_df = session.uq_before[0]
+                if uq_before_df is not None and not uq_before_df.empty:
+                    uq_before_df.to_excel(writer, sheet_name="UQ Before HPO", index=False)
+            if session.uq_after is not None:
+                uq_after_df = session.uq_after[0]
+                if uq_after_df is not None and not uq_after_df.empty:
+                    uq_after_df.to_excel(writer, sheet_name="UQ After HPO", index=False)
+            if session.perl_output_df is not None:
+                session.perl_output_df.to_excel(writer, sheet_name="PERL Reconstruction", index=False)
+        session.xlsx_path = xlsx_path
+        print(f"Excel results saved to: {xlsx_path}")
+    except Exception as e:
+        print(f"  Warning: Excel export failed ({e})")
 
 
 def run_step_perl(session: WorkflowSession) -> None:
@@ -435,9 +473,9 @@ def run_step_perl(session: WorkflowSession) -> None:
     For each residual target column (e.g. "Residual_Deflection"):
         y_PERL = f_physics(inputs) + f_ML(inputs)
 
-    Saves a PERL_Reconstruction.csv to the report directory and prints a metrics summary.
-    If the original (pre-residual) dataset path is stored in the config, also computes
-    physics-only vs PERL accuracy improvement.
+    Prints a metrics summary and stores the reconstruction DataFrame in session.perl_output_df
+    for inclusion in the Excel results file. If the original (pre-residual) dataset path is
+    stored in the config, also computes physics-only vs PERL accuracy improvement.
     """
     import numpy as np
     from sklearn.metrics import mean_squared_error
@@ -462,17 +500,26 @@ def run_step_perl(session: WorkflowSession) -> None:
     # ── 1. Load original dataset to apply physics expressions ─────────────
     # Physics expressions reference columns from the ORIGINAL (pre-residual) dataset,
     # not the residual dataset that the ML model was trained on.
-    orig_test_df = None
+    orig_test_df  = None
+    orig_train_df = None
+    orig_full     = None
     phys_input_df = X_test_raw  # fallback: try residual features if no original available
     if orig_path and os.path.isfile(orig_path):
         try:
             orig_full = pd.read_csv(orig_path)
-            # Align rows: try index match first, then take last N rows (matching split)
+            X_train_raw = r.get("X_train")
+            # Align test rows
             if all(i in orig_full.index for i in X_test_raw.index):
                 orig_test_df = orig_full.loc[X_test_raw.index]
             else:
                 print("[PERL] Warning: could not match test row indices to original dataset — aligning by position (last N rows). Results may be inaccurate if the dataset was shuffled or rows were dropped during cleaning.")
                 orig_test_df = orig_full.iloc[-len(X_test_raw):].reset_index(drop=True)
+            # Align train rows (used for ML-only baseline)
+            if X_train_raw is not None:
+                if all(i in orig_full.index for i in X_train_raw.index):
+                    orig_train_df = orig_full.loc[X_train_raw.index]
+                else:
+                    orig_train_df = orig_full.iloc[:len(X_train_raw)].reset_index(drop=True)
             phys_input_df = orig_test_df
             print(f"[PERL] Loaded original dataset for physics evaluation: {orig_path}")
             print(f"[PERL] Original test rows: {len(phys_input_df)}, columns: {list(phys_input_df.columns)}")
@@ -584,13 +631,32 @@ def run_step_perl(session: WorkflowSession) -> None:
             rmse_physics = float(np.sqrt(mean_squared_error(y_actual_physical, y_physics)))
             rmse_perl    = float(np.sqrt(mean_squared_error(y_actual_physical, y_perl)))
 
+        # ML-only baseline: same model architecture re-fitted on original target (no physics)
+        y_ml_only     = None
+        rmse_ml_only  = float("nan")
+        if orig_train_df is not None and original_col and original_col in orig_train_df.columns:
+            try:
+                orig_train_y = orig_train_df[original_col].values[:len(r["X_train_scaled"])]
+                ml_baseline  = copy.deepcopy(model)
+                ml_baseline.fit(r["X_train_scaled"], orig_train_y)
+                y_ml_only = ml_baseline.predict(r["X_test_scaled"]).ravel()
+                if y_actual_physical is not None:
+                    rmse_ml_only = float(np.sqrt(mean_squared_error(
+                        y_actual_physical[:len(y_ml_only)], y_ml_only
+                    )))
+                print(f"  ML-only RMSE         : {rmse_ml_only:.4f}" if not np.isnan(rmse_ml_only) else "  ML-only RMSE         : n/a")
+            except Exception as e:
+                print(f"[PERL] ML-only baseline failed for {target}: {e}")
+
         perl_results[target] = {
             "physics_col":      phys_col,
             "y_physics":        y_physics,
             "y_ml":             y_ml,
             "y_perl":           y_perl,
+            "y_ml_only":        y_ml_only,
             "rmse_ml_residual": rmse_ml,
             "rmse_physics":     rmse_physics,
+            "rmse_ml_only":     rmse_ml_only,
             "rmse_perl":        rmse_perl,
             "y_actual":         y_actual_physical,
             "original_col":     original_col,
@@ -611,11 +677,7 @@ def run_step_perl(session: WorkflowSession) -> None:
             print(f"  PERL RMSE            : {rmse_perl:.4f}")
             print(f"  Improvement          : {improve:+.1f}%")
 
-    session.perl_results = perl_results
-    session.perl_config  = config      # keep for report section
-
-    # ── 5. Save reconstruction CSV ─────────────────────────────────────────
-    out_csv = os.path.join(session.report_dir, "PERL_Reconstruction.csv")
-    output_df.to_csv(out_csv, index=False)
-    print(f"\n[PERL] Reconstruction CSV saved to: {out_csv}")
-    print(f"[PERL] Columns: {list(output_df.columns)}")
+    session.perl_results    = perl_results
+    session.perl_config     = config      # keep for report section
+    session.perl_output_df  = output_df   # written to Excel by run_step_report
+    print(f"\n[PERL] Columns in reconstruction output: {list(output_df.columns)}")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phoenix_ml_workflow"
-version = "1.1.1"
+version = "1.1.2"
 authors = [
     {name = "Ryan Cheung", email = "cheungkh@lancaster.ac.uk"}
 ]
@@ -49,6 +49,7 @@ dependencies = [
     "lightgbm >= 4.5.0",
     "pywin32 >= 308; platform_system=='Windows'",
     "setuptools < 80",
+    "openpyxl >= 3.1.0",
 ]
 
 classifiers = [

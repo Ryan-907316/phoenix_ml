@@ -19,7 +19,7 @@ This package contains the following:
 - **Pareto front analysis**: Performance vs. training-time trade-off charts with non-dominated solution filtering, automatic log-scaling, and a numbered model legend.
 - **Postprocessing**: Multiple cross-validation methods (K-Fold, Repeated K-Fold, LOO, LpO, Shuffle Split) with full argument and scoring metric customisation. Cook's Distance for influential point identification. Residual analysis including scatter, histogram, Q-Q plots, and automatic best-transform selection via the Anderson-Darling statistic.
 - **Uncertainty Quantification (UQ)**: Bootstrap and conformal prediction intervals with a user-configurable confidence level. Ground truth overlaid on interval plots for direct visual comparison. Run before and/or after HPO to compare the effect of tuning.
-- **Report generation**: All findings compiled into a single PDF with full-resolution images also saved separately. Results tables, HPO CSV outputs, model pipelines saved as .pkl files, and a .json metadata file for full reproducibility.
+- **Report generation**: All findings compiled into a single PDF with full-resolution images also saved separately. Results tables exported to a multi-sheet Excel file, model pipelines saved as .pkl files, and a .json metadata file for full reproducibility.
 
 ## Installation
 
@@ -100,20 +100,41 @@ Make sure to run `phoenix-ml --get-examples` first (or clone the repository) so 
 
 ## Future Work
 
-### Near-term
+### Short-term
+- **Expanded interpretability methods**: Accumulated Local Effects (ALE) plots as a statistically robust alternative to PDPs for datasets with correlated features, Leave One Feature Out (LOFO) importance as a model-agnostic complement to SHAP for feature validation and sensor selection, and per-method checkboxes in the UI so users can enable only the analyses relevant to their problem.
+- **Global sensitivity analysis**: Sobol variance-based indices and Morris elementary-effects screening (SALib) for quantifying which inputs drive output variance and through what interactions: the standard sensitivity analysis toolkit in engineering and a complement to SHAP that addresses different questions.
+- **Advanced conformal prediction**: Jackknife+, CV+, and conformalized quantile regression (CQR) via MAPIE, extending the current split-conformal implementation to provide adaptive interval widths for heteroscedastic data and stronger distribution-free coverage guarantees.
+- **Optuna HPO backend**: TPE, CMA-ES, Gaussian Process Bayesian optimisation, and NSGA-II/III multi-objective search in a single well-maintained pure-Python framework, extending and partially replacing the current scikit-optimize backend.
+- **Multi-objective HPO**: Optimising across multiple metrics simultaneously (predictive performance vs. model complexity vs. training time) using Pareto-optimal selection, turning the existing post-hoc Pareto analysis into an active multi-objective optimiser via Optuna's NSGA-II/III samplers.
+- **Extended regression diagnostics**: VIF and condition number for multicollinearity (preprocessing), PRESS statistic and predicted R², full leverage and influence suite (DFFITS, studentised residuals), Breusch-Pagan/White heteroscedasticity tests, and Durbin-Watson/Ljung-Box autocorrelation tests, all using the existing statsmodels dependency.
+- **Monotonicity and shape constraints**: Exposing the per-feature monotonicity constraints already supported by XGBoost, LightGBM, and HistGradientBoostingRegressor via a UI control, allowing physically-motivated constraints (e.g. drag increasing with velocity, wear increasing with time) to guide model training and improve extrapolation.
+- **Expanded evaluation metrics**: NRMSE, MAPE, KGE (Kling-Gupta Efficiency), PICP, MPIW, and other engineering-standard metrics alongside the existing MSE/R²/Adjusted R²/Q².
+- **Outlier detection**: IsolationForest, Local Outlier Factor, and Minimum Covariance Determinant as optional preprocessing steps, complementing the existing IQR/Z-score methods in dataset cleaning.
+- **Model documentation**: Auto-generated model cards from the existing metadata JSON, structured to document intended use, data provenance, metrics, and known limitations.
 - **User documentation**: Proper guides and tutorials covering machine learning concepts (HPO, interpretability, UQ) and how to get the most out of each step of the workflow.
 - **Advanced model selection**: More regression models, and the ability to choose which hyperparameters to optimise and customise their search spaces directly from the UI.
 - **Classification support**: Extending the workflow to classification problems, including appropriate metrics (accuracy, F1, AUC-ROC etc), confusion matrices, and report sections.
 - **Physics-enhanced regularisation (soft constraints)**: Embedding first-principles expressions as soft penalty terms in the model loss function, allowing physical knowledge to guide training (compared to just residual learning).
-- **Multi-objective HPO**: Optimising across multiple metrics simultaneously (e.g. accuracy vs. training time) using Pareto-optimal selection, extending the existing Pareto front analysis already in the workflow.
 
 ### Medium-term
+- **Symbolic regression / equation discovery**: Integration of gplearn (pure Python, sklearn-compatible) as an equation discovery mode allowing users to find closed-form governing equations directly from data, with the discovered expression optionally fed back into the existing PERL expression mode. PySR (higher performance, Julia backend) as an optional advanced alternative.
+- **NGBoost probabilistic predictions**: Natural Gradient Boosting as a native probabilistic regression model outputting a full predictive distribution per point, bridging the model training and uncertainty quantification modules.
+- **Physics-informed Gaussian Process regression**: GPs with physics-based mean functions and physics-structured kernels as a Bayesian complement to the existing PERL framework, starting with the sklearn GP implementation and progressing to custom kernel classes encoding known physical constraints such as symmetry, periodicity, or monotonicity.
+- **Regression calibration reporting**: Reliability diagrams, proper scoring rules (CRPS, interval score), and calibration metrics (sharpness, RMS calibration error) for all interval-producing methods: bootstrap, conformal, and GP posterior, to assess calibration quality as well as coverage.
+- **Warm-starting and persistent HPO studies**: Seeding optimisation with known-good configurations and persisting study state to disk (SQLite via Optuna) to support pause/resume across sessions in the desktop workflow.
+- **Buckingham Pi / dimensional analysis**: Automatic generation of dimensionless Pi-groups from user-specified variable units using sympy (already a dependency), enabling physically-motivated feature construction and improved model generalisation across operating conditions.
+- **Interpretable additive models**: Penalised-spline Generalised Additive Models with per-feature uncertainty intervals and monotonicity constraints, providing an interpretable, smooth model family between linear regression and black-box models.
+- **SHAP waterfall plots**: Per-prediction local SHAP explanations for individual design points, for cases where an engineer must justify a single prediction.
+- **TabPFN v2 (optional)**: The small-data tabular foundation model (Hollmann et al., 2025) as an optional install providing a strong no-tuning baseline on datasets up to approximately 50,000 rows.
 - **Time series support**: Time-aware train/test splitting, temporal cross-validation strategies, and sequence-capable models for datasets where observations are ordered in time.
 - **Model ensembling**: Stacking, blending, or voting ensembles built from the models already trained in the workflow, as a postprocessing step to squeeze out additional predictive performance.
-- **Automated feature selection**: Using the distance correlation matrix to automatically flag and optionally remove low-information or redundant features before training.
+- **Automated feature selection**: Using the distance correlation matrix and mutual information to automatically flag and optionally remove low-information or redundant features before training.
 - **Interactive reports**: HTML or dashboard-based output as an alternative to the PDF, allowing zoomable plots and filterable results tables.
 
 ### Long-term
+- **Multi-fidelity modelling**: Co-kriging and Kennedy-O'Hagan multi-fidelity GP frameworks for combining cheap low-fidelity data (simulation) with expensive high-fidelity experimental data.
+- **Physics-informed deep kernel GP**: Deep kernel learning with physics-structured kernels and latent force models (GPyTorch) for advanced Bayesian physics-informed inference, as an optional heavy dependency.
+- **Dynamical systems identification**: Sparse identification of nonlinear dynamics (PySINDy) for time-dependent engineering systems: applicable once time-series support is in place.
 - **Hard physics constraints**: Enforcing physical constraints exactly at every prediction (e.g. via Lagrange multipliers or projection methods), going beyond soft regularisation to guarantee physically consistent outputs.
 - **Extended PEML/physics-informed learning**: Physics-Informed Neural Networks (PINNs), Fourier Neural Operators (FNOs), and other architectures capable of learning solution operators for PDEs and a broader class of physics-governed problems.
 

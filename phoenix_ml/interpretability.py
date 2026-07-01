@@ -82,6 +82,11 @@ def plot_ice_and_pdp(model, X_train, feature_names, target_var, model_name,
                 grid_resolution=grid_resolution,
                 percentiles=(0.1, 0.9), ax=ax,
             )
+            # Recolour the PDP average line to the brand orange so it stands out over ICE lines
+            if ax.lines:
+                ax.lines[-1].set_color("#E07818")
+                ax.lines[-1].set_linewidth(2.0)
+            ax.legend(loc='best', fontsize=8)
             ax.set_title(f"Feature: {feature_names[feature_idx]}", fontsize=11)
             ax.set_xlabel(feature_names[feature_idx], fontsize=10)
             ax.set_ylabel(target_var, fontsize=10)
@@ -90,8 +95,8 @@ def plot_ice_and_pdp(model, X_train, feature_names, target_var, model_name,
         for j in range(i + 1, len(axes_flat)):
             fig.delaxes(axes_flat[j])
 
-        part_label = f" (Part {part_idx + 1} of {n_parts})" if n_parts > 1 else ""
-        fig.suptitle(f"ICE and PDP Plots for Target: {target_var} ({model_name}){part_label}", fontsize=14)
+        fig.suptitle(f"ICE and PDP Plots: {target_var} ({model_name})",
+                     fontsize=14, fontweight='bold')
         fig.tight_layout(rect=[0, 0, 1, 0.96])
         plt.close(fig)
         figs.append(fig)
@@ -152,7 +157,7 @@ def plot_shap_summary(model, X_train, feature_names, background_sample_size, tar
     # Attach to current figure explicitly
     fig = plt.gcf()
     ax = plt.gca()
-    ax.set_title(f"SHAP Summary for Target: {target_var} ({model_name})", fontsize=14)
+    ax.set_title(f"SHAP Summary: {target_var} ({model_name})", fontsize=14, fontweight='bold')
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.close(fig)
@@ -205,8 +210,8 @@ def plot_shap_dependence(model, X_train, feature_names, background_sample_size, 
         for j in range(i + 1, len(axes_flat)):
             fig.delaxes(axes_flat[j])
 
-        part_label = f" (Part {part_idx + 1} of {n_parts})" if n_parts > 1 else ""
-        fig.suptitle(f"SHAP Dependence Plots for Target: {target_var} ({model_name}){part_label}", fontsize=14)
+        fig.suptitle(f"SHAP Dependence Plots: {target_var} ({model_name})",
+                     fontsize=14, fontweight='bold')
         fig.tight_layout(rect=[0, 0, 1, 0.96])
         plt.close(fig)
         figs.append(fig)

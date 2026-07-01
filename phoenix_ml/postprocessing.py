@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from tqdm import tqdm
 from scipy.stats import skew, kurtosis, anderson, probplot, norm, boxcox
+from statsmodels.stats.diagnostic import lilliefors as _lilliefors
 from sklearn.model_selection import (
     KFold, RepeatedKFold, GroupKFold, LeaveOneOut, LeavePOut, ShuffleSplit
 )
@@ -173,13 +174,18 @@ def plot_cooks_distance_all_targets(best_models, X_train, X_test, y_train, y_tes
         cooks_d = calculate_cooks_distance(X_test, residuals)
         threshold = 4 / len(cooks_d)
 
+        n_exceed = int(np.sum(cooks_d > threshold))
+        pct_exceed = 100.0 * n_exceed / len(cooks_d)
         axes[idx].stem(range(len(cooks_d)), cooks_d, basefmt=" ", markerfmt=".", linefmt="b")
-        axes[idx].axhline(y=threshold, color="red", linestyle="--", label=f"Threshold (4/n = {threshold:.4f})")
+        axes[idx].axhline(
+            y=threshold, color="red", linestyle="--",
+            label=f"Threshold 4/n = {threshold:.4f}  |  {n_exceed} points ({pct_exceed:.1f}%) exceed threshold"
+        )
         axes[idx].set_yscale("log")
-        axes[idx].set_title(f"Cook's Distance for {model_name} ({target})")
-        axes[idx].set_xlabel("Testing Sample Index #")
+        axes[idx].set_title(f"Cook's Distance: {model_name} ({target})", fontweight='bold')
+        axes[idx].set_xlabel("Testing Sample Index")
         axes[idx].set_ylabel("Cook's Distance (log scale)")
-        axes[idx].legend()
+        axes[idx].legend(loc='best')
 
     plt.tight_layout()
     return fig
@@ -223,13 +229,31 @@ def evaluate_transformations(best_models, X_train, X_test, y_train, y_test):
         for t in ["None", "Log", "Sqrt", "Box-Cox", "Yeo-Johnson"]:
             try:
                 transformed = apply_transformation(residuals, t)
+                tr_arr = np.asarray(transformed, dtype=float)
+
+                # Lilliefors test (correct KS for estimated parameters)
+                try:
+                    lf_stat, lf_p = _lilliefors(tr_arr, dist='norm', pvalmethod='table')
+                    lf_p = float(lf_p)
+                except Exception:
+                    lf_p = None
+
+                # Filiben coefficient (Q-Q Pearson correlation)
+                try:
+                    osm, osr = probplot(tr_arr, dist="norm")[0]
+                    filiben = float(np.corrcoef(osm, osr)[0, 1])
+                except Exception:
+                    filiben = None
+
                 results.append({
                     "Target Variable": target,
                     "Model": model_name,
                     "Transformation": t,
-                    "Skewness": skew(transformed),
-                    "Excess Kurtosis": kurtosis(transformed, fisher=True),
-                    "AD Statistic": anderson(transformed)[0]
+                    "Skewness": skew(tr_arr),
+                    "Excess Kurtosis": kurtosis(tr_arr, fisher=True),
+                    "AD Statistic": anderson(tr_arr)[0],
+                    "Lilliefors p": lf_p,
+                    "Filiben": filiben,
                 })
             except Exception as e:
                 results.append({
@@ -239,22 +263,24 @@ def evaluate_transformations(best_models, X_train, X_test, y_train, y_test):
                     "Skewness": None,
                     "Excess Kurtosis": None,
                     "AD Statistic": None,
+                    "Lilliefors p": None,
+                    "Filiben": None,
                     "Error": str(e)
                 })
 
     return pd.DataFrame(results)
 
-# Plot residual scatter, histogram, and Q–Q using the best transform per target.
+# Plot residual diagnostics using the best transform per target.
+# Returns three figures: scatter+histogram (side-by-side), Q-Q.
 # "Best" is the transform with the minimum AD statistic per target.
 def plot_all_transformations(results_df, best_models, X_train, X_test, y_train, y_test):
     results_df = results_df.dropna(subset=["AD Statistic"])
     best_rows = results_df.loc[results_df.groupby("Target Variable")["AD Statistic"].idxmin()]
     num_targets = len(best_rows)
 
-    fig_r, ax_r = plt.subplots(num_targets, 1, figsize=(10, 5 * num_targets))
-    fig_h, ax_h = plt.subplots(num_targets, 1, figsize=(10, 5 * num_targets))
-    fig_q, ax_q = plt.subplots(num_targets, 1, figsize=(10, 5 * num_targets))
-    ax_r, ax_h, ax_q = map(lambda x: [x] if num_targets == 1 else x, [ax_r, ax_h, ax_q])
+    fig_rh, ax_rh = plt.subplots(num_targets, 2, figsize=(12, 5 * num_targets), squeeze=False)
+    fig_q,  ax_q  = plt.subplots(num_targets, 1, figsize=(6,  5 * num_targets))
+    ax_q = [ax_q] if num_targets == 1 else list(ax_q)
 
     for plot_idx, (_, row) in enumerate(best_rows.iterrows()):
         target = row["Target Variable"]
@@ -268,41 +294,44 @@ def plot_all_transformations(results_df, best_models, X_train, X_test, y_train, 
         y_pred = model.predict(X_test)
         residuals = y_test[target] - y_pred
         transformed = apply_transformation(residuals, trans)
+        tr_arr = np.asarray(transformed, dtype=float)
 
-        # Residuals
-        ax_r[plot_idx].scatter(y_pred, transformed, alpha=0.6, edgecolor="k", label="Data Points")
-        ax_r[plot_idx].axhline(0, color="green", linestyle="--", linewidth=1, label="Zero Residual Line")
-        ax_r[plot_idx].set_title(f"Residuals ({trans}) for {model_name} - {target}")
-        ax_r[plot_idx].set_xlabel("Predicted Values")
-        ax_r[plot_idx].set_ylabel("Transformed Residuals")
-        ax_r[plot_idx].legend()
-        ax_r[plot_idx].grid(True)
+        # Left: residuals scatter
+        ax_s = ax_rh[plot_idx, 0]
+        ax_s.scatter(y_pred, tr_arr, alpha=0.5, s=8, edgecolors="none", label="Data Points")
+        ax_s.axhline(0, color="green", linestyle="--", linewidth=1, label="Zero Line")
+        ax_s.set_title(f"Residuals ({trans}): {target}", fontweight='bold')
+        ax_s.set_xlabel("Predicted Values")
+        ax_s.set_ylabel("Transformed Residuals")
+        ax_s.legend(loc='best')
+        ax_s.grid(True, linewidth=0.4)
 
-        # Histogram
-        ax_h[plot_idx].hist(transformed, bins=30, density=True, alpha=0.6, edgecolor="k")
-        x = np.linspace(transformed.min(), transformed.max(), 100)
-        p = norm.pdf(x, np.mean(transformed), np.std(transformed))
-        ax_h[plot_idx].plot(x, p, 'r--', label="Normal Distribution")
-        ax_h[plot_idx].set_title(f"Histogram of Residuals ({trans}) for {target}")
-        ax_h[plot_idx].set_xlabel("Residuals")
-        ax_h[plot_idx].set_ylabel("Density")
-        ax_h[plot_idx].legend()
-        ax_h[plot_idx].grid(True)
+        # Right: histogram
+        ax_h = ax_rh[plot_idx, 1]
+        ax_h.hist(tr_arr, bins=30, density=True, alpha=0.6, edgecolor="k")
+        x = np.linspace(tr_arr.min(), tr_arr.max(), 100)
+        ax_h.plot(x, norm.pdf(x, np.mean(tr_arr), np.std(tr_arr)), 'r--', label="Normal fit")
+        ax_h.axvline(0, color='black', linestyle='--', linewidth=1, label="Zero")
+        ax_h.set_title(f"Histogram of Residuals ({trans}): {target}", fontweight='bold')
+        ax_h.set_xlabel("Residuals")
+        ax_h.set_ylabel("Density")
+        ax_h.legend(loc='best')
+        ax_h.grid(True, linewidth=0.4)
 
-        # Q-Q Plot
-        res = probplot(transformed, dist="norm")
-        ax_q[plot_idx].scatter(res[0][0], res[0][1], alpha=0.6, edgecolor="k", label="Data Points")
+        # Q-Q
+        res = probplot(tr_arr, dist="norm")
+        ax_q[plot_idx].scatter(res[0][0], res[0][1], alpha=0.6, s=8, edgecolors="none", label="Data Points")
         ax_q[plot_idx].plot(res[0][0], res[1][0] * res[0][0] + res[1][1], 'r--', label="Fitted Line")
-        ax_q[plot_idx].set_title(f"Q-Q Plot ({trans}) for {target}")
+        ax_q[plot_idx].set_title(f"Q-Q Plot ({trans}): {target}", fontweight='bold')
         ax_q[plot_idx].set_xlabel("Theoretical Quantiles")
         ax_q[plot_idx].set_ylabel("Actual Quantiles")
-        ax_q[plot_idx].legend()
-        ax_q[plot_idx].grid(True)
+        ax_q[plot_idx].legend(loc='best')
+        ax_q[plot_idx].grid(True, linewidth=0.4)
 
-    fig_r.tight_layout()
-    fig_h.tight_layout()
+    fig_rh.suptitle("Transformed Residual Diagnostics", fontsize=13, fontweight='bold')
+    fig_rh.tight_layout(rect=[0, 0, 1, 0.97])
     fig_q.tight_layout()
-    return fig_r, fig_h, fig_q
+    return fig_rh, None, fig_q
 
 # Run cross-validation summary for each target with its best model.
 def process_all_targets_with_summary(best_models, X_train, y_train, cv_method, cv_args, scoring_metric):
@@ -320,8 +349,7 @@ def process_all_targets_with_summary(best_models, X_train, y_train, cv_method, c
 
 def plot_residuals_with_influential_points_all_targets(best_models, X_train, X_test, y_train, y_test):
     num_targets = len(best_models)
-    fig, axes = plt.subplots(num_targets, 1, figsize=(10, 5 * num_targets))
-    axes = [axes] if num_targets == 1 else axes
+    fig, axes = plt.subplots(num_targets, 2, figsize=(12, 5 * num_targets), squeeze=False)
 
     for idx, (target, row) in enumerate(best_models.items()):
         model_name = _get_model_name(row)
@@ -330,21 +358,38 @@ def plot_residuals_with_influential_points_all_targets(best_models, X_train, X_t
         model.set_params(**params)
         model.fit(X_train, y_train[target])
         y_pred = model.predict(X_test)
-        residuals = y_test[target] - y_pred
+        residuals = np.asarray(y_test[target] - y_pred, dtype=float)
 
         cooks_d = calculate_cooks_distance(X_test, residuals)
         threshold = 4 / len(cooks_d)
         influential = cooks_d > threshold
 
-        axes[idx].scatter(y_pred, residuals, label="Residuals", edgecolor='k')
-        axes[idx].scatter(y_pred[influential], residuals[influential], color='red', label="Influential", edgecolor='k')
-        axes[idx].axhline(0, color="green", linestyle="--")
-        axes[idx].set_title(f"Residuals with Influential Points: {model_name} ({target})")
-        axes[idx].set_xlabel("Predicted Values")
-        axes[idx].set_ylabel("Residuals")
-        axes[idx].legend()
+        # Left: scatter
+        ax_s = axes[idx, 0]
+        ax_s.scatter(y_pred, residuals, s=8, alpha=0.5, edgecolors="none", label="Residuals")
+        ax_s.scatter(y_pred[influential], residuals[influential], s=20, color='red',
+                     edgecolors='k', linewidths=0.5, label="Influential")
+        ax_s.axhline(0, color="green", linestyle="--", linewidth=1)
+        ax_s.set_title(f"Residuals: {model_name} ({target})", fontweight='bold')
+        ax_s.set_xlabel("Predicted Values")
+        ax_s.set_ylabel("Residuals")
+        ax_s.legend(loc='best')
+        ax_s.grid(True, linewidth=0.4)
 
-    plt.tight_layout()
+        # Right: histogram
+        ax_h = axes[idx, 1]
+        ax_h.hist(residuals, bins=30, density=True, alpha=0.6, edgecolor="k")
+        x = np.linspace(residuals.min(), residuals.max(), 100)
+        ax_h.plot(x, norm.pdf(x, np.mean(residuals), np.std(residuals)), 'r--', label="Normal fit")
+        ax_h.axvline(0, color='black', linestyle='--', linewidth=1, label="Zero")
+        ax_h.set_title(f"Histogram of Residuals: {target}", fontweight='bold')
+        ax_h.set_xlabel("Residuals")
+        ax_h.set_ylabel("Density")
+        ax_h.legend(loc='best')
+        ax_h.grid(True, linewidth=0.4)
+
+    fig.suptitle("Residuals with Influential Points (Pre-Transformation)", fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
     return fig
 
 # End-to-end postprocessing pipeline for selected best models.

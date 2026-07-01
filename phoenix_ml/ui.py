@@ -175,7 +175,7 @@ class _QueueStream:
 class PhoenixApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Phoenix ML")
+        self.title("phoenix_ml")
         self.geometry("1150x820")
         self.minsize(950, 680)
 
@@ -1247,7 +1247,7 @@ class PhoenixApp(ctk.CTk):
         ctk.CTkLabel(log_hdr, text="Progress Log", font=ctk.CTkFont(weight="bold")).pack(side="left")
         ctk.CTkButton(log_hdr, text="Clear", width=60, command=self._clear_log).pack(side="right")
 
-        tab.rowconfigure(4, weight=1)
+        tab.rowconfigure(4, weight=1, minsize=120)
         self.log_textbox = ctk.CTkTextbox(tab, state="disabled",
                                           font=ctk.CTkFont(family="Courier New", size=11))
         self.log_textbox.grid(row=4, column=0, sticky="nsew", padx=6, pady=(0, 6))
@@ -1281,27 +1281,65 @@ class PhoenixApp(ctk.CTk):
     def _setup_preprocessing_tab(self):
         tab = self.tabview.tab("Preprocessing")
         tab.columnconfigure(1, weight=1)
-        self._preproc_test_size  = self._lbl_entry(tab, "Test Size:",     "0.2",   0)
-        self._preproc_split      = self._lbl_option(tab, "Split Method:",
-                                                    ["First", "Last", "Random"], 1)
-        self._preproc_show_plots  = self._lbl_check(tab, "Show Preprocessing Plots",                True,  2)
-        self._preproc_dist_dummy  = self._lbl_check(tab, "Distance Correlation: Include Dummy",      True,  3)
-        self._preproc_dist_mp     = self._lbl_check(tab, "Distance Correlation: Marchenko-Pastur",   False, 4)
+        self._preproc_test_size   = self._lbl_entry(tab, "Test Size:",     "0.2",   0)
+        self._preproc_split       = self._lbl_option(tab, "Split Method:",
+                                                     ["First", "Last", "Random"], 1)
+        self._preproc_split.configure(command=self._refresh_preproc_state)
+        self._preproc_scaler      = self._lbl_option(tab, "Feature Scaling:",
+                                                     ["Standard", "MinMax", "Robust", "None"], 2)
+        self._preproc_random_state_lbl, self._preproc_random_state = self._lbl_entry_ref(
+            tab, "Random State (Random split):", "0", 3)
+        self._preproc_show_plots  = self._lbl_check(tab, "Show Preprocessing Plots",                True,  4)
+        self._preproc_dist_dummy  = self._lbl_check(tab, "Distance Correlation: Include Dummy",      True,  5)
+        self._preproc_dist_mp     = self._lbl_check(tab, "Distance Correlation: Marchenko-Pastur",   False, 6)
+        self._refresh_preproc_state()
+
+    def _refresh_preproc_state(self, *_):
+        is_random = self._preproc_split.get().lower() == "random"
+        state = "normal" if is_random else "disabled"
+        self._preproc_random_state.configure(state=state)
+        self._preproc_random_state_lbl.configure(
+            text_color=("gray20" if is_random else "gray60")
+        )
 
     # ── Uncertainty Quantification Tab ────────────────────────────────────────
 
     def _setup_uq_tab(self):
         tab = self.tabview.tab("Uncertainty Quantification")
         tab.columnconfigure(1, weight=1)
-        self._uq_method      = self._lbl_option(tab, "Method:",
-                                                ["Bootstrapping", "Conformal", "Both"], 0)
-        self._uq_n_bootstrap = self._lbl_entry(tab, "Bootstrap Samples:",       "200",  1)
+
+        # Method selection via checkboxes (replaces single option menu)
+        ctk.CTkLabel(tab, text="Methods:", anchor="w", width=160).grid(row=0, column=0, padx=8, pady=4, sticky="w")
+        method_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        method_frame.grid(row=0, column=1, sticky="w", padx=4, pady=4)
+        self._uq_bootstrap_var = tk.BooleanVar(value=True)
+        self._uq_conformal_var = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(method_frame, text="Bootstrapping", variable=self._uq_bootstrap_var,
+                        command=self._refresh_uq_state).pack(side="left", padx=(0, 12))
+        ctk.CTkCheckBox(method_frame, text="Conformal Prediction", variable=self._uq_conformal_var,
+                        command=self._refresh_uq_state).pack(side="left")
+
+        self._uq_n_bootstrap_lbl, self._uq_n_bootstrap = self._lbl_entry_ref(
+            tab, "Bootstrap Samples:", "200", 1)
         self._uq_confidence  = self._lbl_entry(tab, "Confidence Interval (%):", "95",   2)
-        self._uq_calib_frac  = self._lbl_entry(tab, "Calibration Fraction:",    "0.05", 3)
+        self._uq_calib_frac_lbl, self._uq_calib_frac = self._lbl_entry_ref(
+            tab, "Calibration Fraction:", "0.05", 3)
         self._uq_subsample   = self._lbl_entry(tab, "Subsample Test Size:",     "50",   4)
-        self._uq_n_jobs      = self._lbl_entry(tab, "Bootstrap Parallel Jobs:", "1",    5)
-        ctk.CTkLabel(tab, text="(1 = off, -1 = all cores — only helps with slow models on large datasets)",
-                     anchor="w").grid(row=5, column=2, padx=(0, 8), sticky="w")
+        self._uq_n_jobs_lbl, self._uq_n_jobs = self._lbl_entry_ref(
+            tab, "Bootstrap Parallel Jobs:", "1", 5)
+        ctk.CTkLabel(tab, text="(1 = off, -1 = all cores)",
+                     anchor="w").grid(row=6, column=1, padx=4, sticky="w")
+        self._refresh_uq_state()
+
+    def _refresh_uq_state(self, *_):
+        bs_on   = self._uq_bootstrap_var.get()
+        conf_on = self._uq_conformal_var.get()
+        for w in (self._uq_n_bootstrap, self._uq_n_jobs):
+            w.configure(state="normal" if bs_on else "disabled")
+        self._uq_n_bootstrap_lbl.configure(text_color=("gray20" if bs_on else "gray60"))
+        self._uq_n_jobs_lbl.configure(text_color=("gray20" if bs_on else "gray60"))
+        self._uq_calib_frac.configure(state="normal" if conf_on else "disabled")
+        self._uq_calib_frac_lbl.configure(text_color=("gray20" if conf_on else "gray60"))
 
     # ── Interpretability Tab ──────────────────────────────────────────────────
 
@@ -1749,15 +1787,35 @@ class PhoenixApp(ctk.CTk):
             messagebox.showerror("Invalid Input", "Test Size must be a decimal number."); return False
         if not (0 < s.test_size < 1):
             messagebox.showerror("Invalid Input", "Test Size must be between 0 and 1 (e.g. 0.2 for 20%)."); return False
-        s.split_method       = self._preproc_split.get()   # "First"/"Last"/"Random"; code uses .lower()
-        s.show_preproc_plots = self._preproc_show_plots.get()
-        s.dist_corr_dummy    = self._preproc_dist_dummy.get()
-        s.dist_corr_mp       = self._preproc_dist_mp.get()
+        s.split_method         = self._preproc_split.get()   # "First"/"Last"/"Random"; code uses .lower()
+        s.scaler_type          = self._preproc_scaler.get()
+        s.show_preproc_plots   = self._preproc_show_plots.get()
+        s.dist_corr_dummy      = self._preproc_dist_dummy.get()
+        s.dist_corr_mp         = self._preproc_dist_mp.get()
+        if s.split_method.lower() == "random":
+            try:
+                rs_val = self._preproc_random_state.get().strip()
+                s.split_random_state = int(rs_val) if rs_val else None
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Random State must be an integer."); return False
+        else:
+            s.split_random_state = None
+        s.report_source = "ui"
 
         # Uncertainty Quantification
+        bs_on   = self._uq_bootstrap_var.get()
+        conf_on = self._uq_conformal_var.get()
+        if not bs_on and not conf_on:
+            messagebox.showerror("Invalid Input", "Please select at least one UQ method."); return False
+        if bs_on and conf_on:
+            uq_method_str = "Both"
+        elif bs_on:
+            uq_method_str = "Bootstrapping"
+        else:
+            uq_method_str = "Conformal"
         try:
             s.uq_settings = dict(
-                uq_method=self._uq_method.get(),
+                uq_method=uq_method_str,
                 n_bootstrap=int(self._uq_n_bootstrap.get()),
                 confidence_interval=float(self._uq_confidence.get()),
                 calibration_frac=float(self._uq_calib_frac.get()),

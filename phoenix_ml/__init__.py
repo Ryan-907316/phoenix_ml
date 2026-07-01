@@ -1,5 +1,5 @@
 """
-phoenix_ml — A Physics and Hybrid Optimised ENgine for Interpretability
+phoenix_ml: A Physics and Hybrid Optimised ENgine for Interpretability
 and eXplainability for Machine Learning.
 
 Graphical interface
@@ -26,7 +26,10 @@ Run the full workflow from Python::
     )
 """
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
+
+import warnings
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
 
 from phoenix_ml.workflow import run_workflow  # noqa: F401
 

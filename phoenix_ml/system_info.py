@@ -1,6 +1,5 @@
 # system_info.py
-# This module collects some basic information about the device you are using to give the user more information about what they can run.
-# All this information is displayed in the report as a neat table.
+# Collects basic system information and displays it at startup and in the PDF report.
 
 import os
 import sys
@@ -30,6 +29,47 @@ class SuppressLibraryLogs:
         sys.stderr = self._original_stderr
 
 
+def _detect_gpu():
+    if _win32com is not None:
+        try:
+            wmi = _win32com.GetObject("winmgmts:")
+            gpu_list = [gpu.Name.strip() for gpu in wmi.InstancesOf("Win32_VideoController")]
+            return ", ".join(gpu_list) if gpu_list else "No dedicated GPU detected"
+        except Exception as e:
+            return f"GPU detection failed: {e}"
+
+    if sys.platform.startswith("linux"):
+        try:
+            import subprocess
+            result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
+            gpus = [
+                line.split(": ", 1)[-1].strip()
+                for line in result.stdout.splitlines()
+                if any(k in line for k in ("VGA", "3D", "Display"))
+            ]
+            return ", ".join(gpus) if gpus else "No dedicated GPU detected"
+        except Exception:
+            return "GPU detection not available"
+
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["system_profiler", "SPDisplaysDataType"],
+                capture_output=True, text=True, timeout=10,
+            )
+            gpus = [
+                line.split(":", 1)[1].strip()
+                for line in result.stdout.splitlines()
+                if "Chipset Model:" in line
+            ]
+            return ", ".join(gpus) if gpus else "No dedicated GPU detected"
+        except Exception:
+            return "GPU detection not available"
+
+    return "GPU detection not available"
+
+
 class SystemInfo:
     # Collects and displays system information (OS, CPU, RAM, GPU, Python version).
 
@@ -40,14 +80,31 @@ class SystemInfo:
         }
 
     def gather(self):
+        freq = psutil.cpu_freq()
+        cpu_freq = f"{freq.current / 1000:.2f} GHz" if freq else "Unknown"
+
+        mem = psutil.virtual_memory()
+        total_ram = f"{round(mem.total / (1024**3), 1)} GiB"
+        available_ram = f"{round(mem.available / (1024**3), 1)} GiB"
+
+        disk = psutil.disk_usage(os.path.expanduser("~"))
+        free_disk = (
+            f"{round(disk.free / (1024**3), 1)} GiB free "
+            f"/ {round(disk.total / (1024**3), 1)} GiB total"
+        )
+
         self.info["Feature"] = [
             "Operating System",
             "Processor",
             "CPU",
-            "Number of Physical Cores",
+            "Physical Cores",
             "Threads",
+            "CPU Frequency",
             "Python Version",
-            "RAM"
+            "RAM",
+            "RAM Available",
+            "Free Disk Space",
+            "GPU",
         ]
 
         self.info["Details"] = [
@@ -56,23 +113,13 @@ class SystemInfo:
             cpuinfo.get_cpu_info().get("brand_raw", "Unknown"),
             psutil.cpu_count(logical=False),
             psutil.cpu_count(logical=True),
+            cpu_freq,
             sys.version.split()[0],
-            f"{round(psutil.virtual_memory().total / 1e9, 2)} GB" # Note: Total available RAM, not the advertised amount
+            total_ram,
+            available_ram,
+            free_disk,
+            _detect_gpu(),
         ]
-
-        # GPU Detection using WMI (Windows only)
-        try:
-            if _win32com is None:
-                gpu_details = "GPU detection not available (Windows only)"
-            else:
-                wmi = _win32com.GetObject("winmgmts:")
-                gpu_list = [gpu.Name.strip() for gpu in wmi.InstancesOf("Win32_VideoController")]
-                gpu_details = ", ".join(gpu_list) if gpu_list else "No dedicated GPU detected"
-        except Exception as e:
-            gpu_details = f"GPU detection failed: {e}"
-
-        self.info["Feature"].append("GPU")
-        self.info["Details"].append(gpu_details)
 
         return self.info
 

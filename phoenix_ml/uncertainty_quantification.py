@@ -141,7 +141,7 @@ def plot_uncertainty_results_for_model(
         figsize=(8 * len(methods), 5 * num_targets),
         squeeze=False
     )
-    fig.suptitle(f"Uncertainty Quantification for {model_name}", fontsize=16)
+    fig.suptitle(f"Uncertainty Quantification: {model_name}", fontsize=14, fontweight='bold')
 
     for row_idx, target_var in enumerate(results_by_target):
         result_data = results_by_target[target_var]
@@ -158,10 +158,10 @@ def plot_uncertainty_results_for_model(
                 y_vals = y_true.values if hasattr(y_true, "values") else np.asarray(y_true)
                 ax.plot(y_vals, linestyle="--", color="black", linewidth=1.0, label="Ground Truth")
             if method == "Bootstrapping":
-                stat_str = f"Mean ± Std Range = {res['avg_range']:.2f} ± {res['std_range']:.2f}, Coverage = {res['coverage']:.2f}%"
+                stat_str = f"Mean +/- Std Range = {res['avg_range']:.2f} +/- {res['std_range']:.2f}, Coverage = {res['coverage']:.2f}%"
             else:
                 stat_str = f"Interval Width = {res['avg_range']:.2f}, Coverage = {res['coverage']:.2f}%"
-            ax.set_title(f"{method}: {target_var}\n{stat_str}")
+            ax.set_title(f"{method}: {target_var}\n{stat_str}", fontweight='bold')
             ax.set_xlabel("Sample #")
             ax.set_ylabel(f"Predicted {target_var}")
             ax.legend(loc="upper right")
