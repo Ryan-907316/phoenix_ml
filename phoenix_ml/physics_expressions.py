@@ -15,6 +15,7 @@ import operator
 import re
 import numpy as np
 import pandas as pd
+from scipy.special import erf as _erf
 from typing import Dict, List, Tuple
 
 _BIN_OPS = {
@@ -56,6 +57,13 @@ _FUNCS = {
     "floor":    np.floor,
     "ceil":     np.ceil,
     "gradient": np.gradient,   # finite-difference d(x)/d(row index)
+    # Special functions
+    "erf":      _erf,          # Gauss error function — useful for cumulative normal distributions
+}
+
+# Two-argument functions (atan2 only for now — separate from _FUNCS to keep validator clean)
+_FUNCS_2ARG = {
+    "atan2": np.arctan2,       # atan2(y, x) — full-circle arctangent, avoids quadrant ambiguity
 }
 
 _LATEX_FUNCS = {
@@ -78,12 +86,23 @@ _LATEX_FUNCS = {
     "floor":    lambda a: rf"\lfloor {a} \rfloor",
     "ceil":     lambda a: rf"\lceil {a} \rceil",
     "gradient": lambda a: rf"\frac{{d}}{{dt}}\!\left({a}\right)",
+    "erf":      lambda a: rf"\mathrm{{erf}}\!\left({a}\right)",
+}
+
+_LATEX_FUNCS_2ARG = {
+    "atan2": lambda a, b: rf"\mathrm{{atan2}}\!\left({a},\,{b}\right)",
 }
 
 # Recognised symbolic constants (appear as Name nodes, not function calls)
 _CONSTANTS = {"pi": np.pi}
 
 _BACKTICK_RE = re.compile(r"`([^`]+)`")
+
+# Generous for any real physics equation; blocks a typo like `2 ** 999999999`
+# from computing an unbounded-magnitude Python bignum (int**int is arbitrary
+# precision, so this isn't just slow — it can exhaust memory before Python's
+# int-to-str guard ever gets a chance to kick in).
+_MAX_POW_EXPONENT = 1000
 
 
 class ExpressionError(ValueError):
@@ -138,6 +157,13 @@ def _validate(node: ast.AST) -> None:
     if isinstance(node, ast.BinOp):
         if type(node.op) not in _BIN_OPS:
             raise ExpressionError(f"Operator '{type(node.op).__name__}' is not supported")
+        if isinstance(node.op, ast.Pow) and isinstance(node.right, ast.Constant) \
+                and isinstance(node.right.value, (int, float)) \
+                and abs(node.right.value) > _MAX_POW_EXPONENT:
+            raise ExpressionError(
+                f"Exponent {node.right.value:g} exceeds the maximum allowed "
+                f"magnitude ({_MAX_POW_EXPONENT}) — likely a typo"
+            )
         _validate(node.left)
         _validate(node.right)
     elif isinstance(node, ast.UnaryOp):
@@ -145,12 +171,18 @@ def _validate(node: ast.AST) -> None:
             raise ExpressionError(f"Operator '{type(node.op).__name__}' is not supported")
         _validate(node.operand)
     elif isinstance(node, ast.Call):
-        if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCS:
-            names = ", ".join(sorted(_FUNCS))
+        fname = node.func.id if isinstance(node.func, ast.Name) else None
+        if fname in _FUNCS_2ARG:
+            if len(node.args) != 2 or node.keywords:
+                raise ExpressionError(f"'{fname}' takes exactly two arguments: {fname}(y, x)")
+            _validate(node.args[0]); _validate(node.args[1])
+        elif fname in _FUNCS:
+            if len(node.args) != 1 or node.keywords:
+                raise ExpressionError(f"'{fname}' takes exactly one argument")
+            _validate(node.args[0])
+        else:
+            names = ", ".join(sorted(list(_FUNCS) + list(_FUNCS_2ARG)))
             raise ExpressionError(f"Unknown function — supported: {names}")
-        if len(node.args) != 1 or node.keywords:
-            raise ExpressionError(f"'{node.func.id}' takes exactly one argument")
-        _validate(node.args[0])
     elif isinstance(node, ast.Name):
         return
     elif isinstance(node, ast.Constant):
@@ -167,7 +199,10 @@ def referenced_names(node: ast.AST, name_map: Dict[str, str]) -> set:
     if isinstance(node, ast.UnaryOp):
         return referenced_names(node.operand, name_map)
     if isinstance(node, ast.Call):
-        return referenced_names(node.args[0], name_map)
+        refs = referenced_names(node.args[0], name_map)
+        if len(node.args) > 1:
+            refs |= referenced_names(node.args[1], name_map)
+        return refs
     if isinstance(node, ast.Name):
         actual = name_map.get(node.id, node.id)
         if actual in _CONSTANTS:
@@ -183,7 +218,13 @@ def evaluate(node: ast.AST, namespace: Dict[str, pd.Series], name_map: Dict[str,
     if isinstance(node, ast.UnaryOp):
         return _UNARY_OPS[type(node.op)](evaluate(node.operand, namespace, name_map))
     if isinstance(node, ast.Call):
-        return _FUNCS[node.func.id](evaluate(node.args[0], namespace, name_map))
+        fname = node.func.id
+        if fname in _FUNCS_2ARG:
+            return _FUNCS_2ARG[fname](
+                evaluate(node.args[0], namespace, name_map),
+                evaluate(node.args[1], namespace, name_map),
+            )
+        return _FUNCS[fname](evaluate(node.args[0], namespace, name_map))
     if isinstance(node, ast.Name):
         actual = name_map.get(node.id, node.id)
         if actual in _CONSTANTS:
@@ -197,7 +238,11 @@ def evaluate(node: ast.AST, namespace: Dict[str, pd.Series], name_map: Dict[str,
 
 
 def _mathrm(name: str) -> str:
-    return rf"\mathrm{{{name.replace('_', r'\_').replace(' ', r'\ ')}}}"
+    # Escaping done outside the f-string expression part: Python 3.11 and
+    # earlier reject a backslash anywhere inside `{...}`, even nested inside
+    # a string literal argument (relaxed only by PEP 701 in 3.12).
+    escaped = name.replace('_', r'\_').replace(' ', r'\ ')
+    return rf"\mathrm{{{escaped}}}"
 
 
 def to_latex(node: ast.AST, name_map: Dict[str, str], parent_prec: int = 0) -> str:
@@ -220,6 +265,9 @@ def to_latex(node: ast.AST, name_map: Dict[str, str], parent_prec: int = 0) -> s
         s = f"-{inner}" if isinstance(node.op, ast.USub) else inner
         return rf"\left({s}\right)" if parent_prec > 2 else s
     if isinstance(node, ast.Call):
+        if node.func.id in _LATEX_FUNCS_2ARG:
+            return _LATEX_FUNCS_2ARG[node.func.id](
+                to_latex(node.args[0], name_map, 0), to_latex(node.args[1], name_map, 0))
         return _LATEX_FUNCS[node.func.id](to_latex(node.args[0], name_map, 0))
     if isinstance(node, ast.Name):
         actual = name_map.get(node.id, node.id)
@@ -271,20 +319,23 @@ def extract_reconstruction_mapping(expression_texts: List[str]) -> Dict[str, str
     backtick-quoted names on the right are dataset columns, not intermediate estimates.
     """
     mapping: Dict[str, str] = {}
-    for text in expression_texts:
+    for i, text in enumerate(expression_texts, start=1):
         text = text.strip()
         if not text:
             continue
         try:
             lhs, tree, name_map = parse_expression(text)
-            body = tree.body
-            if not (isinstance(body, ast.BinOp) and isinstance(body.op, ast.Sub)):
-                continue
-            right = body.right
-            if isinstance(right, ast.Name) and right.id not in name_map:
-                mapping[lhs] = right.id
-        except ExpressionError:
+        except ExpressionError as e:
+            # A genuinely malformed expression (bad syntax, unknown function, ...)
+            # must not be silently dropped — that would leave the reconstruction
+            # map quietly incomplete instead of naming the broken expression.
+            raise ExpressionError(f"Expression {i} ('{text}'): {e}") from e
+        body = tree.body
+        if not (isinstance(body, ast.BinOp) and isinstance(body.op, ast.Sub)):
             continue
+        right = body.right
+        if isinstance(right, ast.Name) and right.id not in name_map:
+            mapping[lhs] = right.id
     return mapping
 
 
@@ -297,25 +348,25 @@ def extract_measured_mapping(expression_texts: List[str]) -> Dict[str, str]:
     This gives a reliable lookup regardless of how the residual target was named.
     """
     mapping: Dict[str, str] = {}
-    for text in expression_texts:
+    for i, text in enumerate(expression_texts, start=1):
         text = text.strip()
         if not text:
             continue
         try:
             lhs, tree, name_map = parse_expression(text)
-            body = tree.body
-            if not (isinstance(body, ast.BinOp) and isinstance(body.op, ast.Sub)):
-                continue
-            right = body.right
-            left  = body.left
-            # Right must be a plain identifier (physics estimate, not a dataset col)
-            if not (isinstance(right, ast.Name) and right.id not in name_map):
-                continue
-            # Left is the measured column — plain or backtick-quoted
-            if isinstance(left, ast.Name):
-                mapping[lhs] = name_map.get(left.id, left.id)
-        except ExpressionError:
+        except ExpressionError as e:
+            raise ExpressionError(f"Expression {i} ('{text}'): {e}") from e
+        body = tree.body
+        if not (isinstance(body, ast.BinOp) and isinstance(body.op, ast.Sub)):
             continue
+        right = body.right
+        left  = body.left
+        # Right must be a plain identifier (physics estimate, not a dataset col)
+        if not (isinstance(right, ast.Name) and right.id not in name_map):
+            continue
+        # Left is the measured column — plain or backtick-quoted
+        if isinstance(left, ast.Name):
+            mapping[lhs] = name_map.get(left.id, left.id)
     return mapping
 
 
@@ -338,7 +389,7 @@ def save_physics_config(
         "measured_map": measured_map or {},
         "original_dataset_path": original_dataset_path,
     }
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
 
 
@@ -370,13 +421,13 @@ def save_script_physics_config(
         "measured_map": measured_map,
         "original_dataset_path": original_dataset_path,
     }
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
 
 
 def load_physics_config(path: str) -> dict:
     import json
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -394,6 +445,8 @@ def select_output_columns(df: pd.DataFrame, columns_text: str) -> pd.DataFrame:
         name = raw[1:-1].strip() if raw.startswith("`") and raw.endswith("`") else raw
         if name not in df.columns:
             raise ExpressionError(f"Unknown output column '{name}'")
+        if name in names:
+            raise ExpressionError(f"Column '{name}' is listed more than once")
         names.append(name)
     if not names:
         return df

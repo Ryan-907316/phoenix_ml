@@ -3,8 +3,13 @@
 # Handles column type detection, sensor issue detection, and cleaning operations.
 
 from __future__ import annotations
+import copy
+import re
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.covariance import EllipticEnvelope
 
 # ── Column types ──────────────────────────────────────────────────────────────
 
@@ -22,10 +27,17 @@ ROLE_EXCLUDE   = "Exclude"
 
 # ── Outlier methods ───────────────────────────────────────────────────────────
 
-OUTLIER_NONE       = "None"
-OUTLIER_IQR        = "Interquartile Range"
-OUTLIER_ZSCORE     = "Z-Score"
-OUTLIER_PERCENTILE = "Percentage"
+OUTLIER_NONE              = "None"
+OUTLIER_IQR               = "Interquartile Range"
+OUTLIER_ZSCORE            = "Z-Score"
+OUTLIER_PERCENTILE        = "Percentage"
+OUTLIER_ISOLATION_FOREST  = "Isolation Forest"
+OUTLIER_LOF               = "Local Outlier Factor"
+OUTLIER_MCD               = "Minimum Covariance Determinant"
+
+# Multivariate methods work on the full feature matrix at once and return a
+# row-level mask directly, unlike IQR/Z-Score/Percentage which run per-column.
+MULTIVARIATE_OUTLIER_METHODS = {OUTLIER_ISOLATION_FOREST, OUTLIER_LOF, OUTLIER_MCD}
 
 # ── Actions ───────────────────────────────────────────────────────────────────
 
@@ -42,16 +54,56 @@ ACTION_DROP   = "Drop Rows"
 
 # ── Type detection ────────────────────────────────────────────────────────────
 
+# An object column counts as numeric when at least this fraction of its non-null
+# values parse as numbers. Real-world sensor CSVs often carry a handful of text
+# entries ("error", "----", "NA") in an otherwise numeric channel; one stray string
+# should not cost the user the whole column.
+NUMERIC_COERCE_THRESHOLD = 0.90
+
+
+def _is_stringlike_dtype(series: pd.Series) -> bool:
+    """True for legacy object-dtype text columns and pandas >= 3.0's dedicated
+    string dtype (PDEP-14 made the latter the default for `pd.read_csv` text
+    columns, so checking `dtype == object` alone silently stops matching)."""
+    return pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)
+
+
+def coerce_numeric(series: pd.Series):
+    """Try converting an object column to numeric. Returns (coerced, n_unparseable)
+    when at least NUMERIC_COERCE_THRESHOLD of non-null values parse (unparseable
+    entries become NaN), else (None, 0)."""
+    if not _is_stringlike_dtype(series):
+        return None, 0
+    non_null = series.dropna()
+    if len(non_null) == 0:
+        return None, 0
+    coerced = pd.to_numeric(series, errors="coerce")
+    n_bad = int(coerced[series.notna()].isna().sum())
+    if 1.0 - n_bad / len(non_null) >= NUMERIC_COERCE_THRESHOLD:
+        return coerced, n_bad
+    return None, 0
+
+
 def detect_column_type(series: pd.Series) -> str:
     if pd.api.types.is_datetime64_any_dtype(series):
         return TYPE_DATETIME
-    if series.dtype == object:
-        sample = series.dropna().head(20)
+    if _is_stringlike_dtype(series):
+        # Random, not head(20): a sorted column or one with a placeholder value
+        # clustered at the start (e.g. blank/"Unknown" rows before real data
+        # begins) would otherwise misclassify off a head-sample that isn't
+        # representative of the column as a whole.
+        non_null = series.dropna()
+        sample = (non_null.sample(n=min(20, len(non_null)), random_state=0)
+                  if len(non_null) > 0 else non_null)
         try:
             pd.to_datetime(sample)
             return TYPE_DATETIME
         except Exception:
-            return TYPE_STRING
+            pass
+        # Mostly-numeric text column (sensor channel with stray text entries)
+        if coerce_numeric(series)[0] is not None:
+            return TYPE_NUMERIC
+        return TYPE_STRING
     if pd.api.types.is_numeric_dtype(series):
         unique_vals = set(series.dropna().unique())
         if unique_vals.issubset({0, 1, 0.0, 1.0}):
@@ -60,18 +112,35 @@ def detect_column_type(series: pd.Series) -> str:
     return TYPE_STRING
 
 
-def _is_likely_id(series: pd.Series) -> bool:
+def _constant_step_info(series: pd.Series):
+    """Detect strictly-increasing, constant-step columns.
+
+    Returns (is_constant_step, step, first_value). Both record IDs (0,1,2,...)
+    and regularly-sampled time axes (0,60,120,... seconds) look like this, so the
+    caller has to disambiguate — a time axis is a legitimate model input, an ID
+    is not.
+    """
     if not pd.api.types.is_numeric_dtype(series):
-        return False
+        return False, None, None
     s = series.dropna()
-    if len(s) == 0:
-        return False
-    if len(s) != series.nunique():
-        return False
+    if len(s) < 3 or len(s) != series.nunique():
+        return False, None, None
     diffs = s.diff().dropna()
-    if len(diffs) == 0:
-        return False
-    return bool((diffs > 0).all() and diffs.std() < 1e-6)
+    if len(diffs) == 0 or not (diffs > 0).all() or diffs.std() >= 1e-6:
+        return False, None, None
+    return True, float(diffs.iloc[0]), float(s.iloc[0])
+
+
+_TIME_NAME_TOKENS = {
+    "t", "time", "timestamp", "stamp", "date", "datetime", "elapsed",
+    "sec", "secs", "second", "seconds", "min", "mins", "minute", "minutes",
+    "hour", "hours", "hr", "hrs", "day", "days",
+}
+
+
+def _looks_time_named(name: str) -> bool:
+    tokens = re.split(r"[^a-zA-Z]+", str(name).lower())
+    return any(tok in _TIME_NAME_TOKENS for tok in tokens if tok)
 
 
 def _is_zero_variance(series: pd.Series) -> bool:
@@ -178,6 +247,50 @@ def detect_outliers_percentile(series: pd.Series, pct: float = 95.0) -> pd.Serie
     return mask.fillna(False)
 
 
+def detect_outliers_multivariate(
+    df_numeric: pd.DataFrame, method: str, contamination: float = 0.1,
+    random_state: int | None = None,
+) -> pd.Series:
+    """Row-level multivariate outlier mask.
+
+    `df_numeric` should already contain only the numeric feature columns to
+    score (targets/timestamps/excluded columns removed by the caller) — these
+    methods look at the joint feature space, not one column at a time.
+    Rows with any NaN in `df_numeric` are excluded from fitting and returned
+    as not-flagged; missing-value handling deals with those separately.
+    """
+    mask = pd.Series(False, index=df_numeric.index)
+    complete = df_numeric.dropna()
+    if len(complete) < 10 or complete.shape[1] == 0:
+        return mask
+
+    # None resolves to seed 0 (package-wide convention) so IsolationForest/
+    # EllipticEnvelope flag the same rows on every run by default.
+    random_state = 0 if random_state is None else random_state
+
+    # Defensive clamp: sklearn requires contamination in (0, 0.5]. The UI shares one
+    # "outlier_threshold" field across IQR (~1.5), Percentage (~95.0), and these
+    # multivariate methods, so a value left over from switching methods would
+    # otherwise crash here with a raw sklearn InvalidParameterError instead of this
+    # codebase's usual friendly handling. apply_cleaning() clamps (and logs a
+    # [WARN] about it) before calling this function; this is a second, silent
+    # safety net for any other caller.
+    contamination = min(max(float(contamination), 1e-4), 0.5)
+
+    if method == OUTLIER_ISOLATION_FOREST:
+        model = IsolationForest(contamination=contamination, random_state=random_state)
+    elif method == OUTLIER_LOF:
+        model = LocalOutlierFactor(contamination=contamination, novelty=False)
+    elif method == OUTLIER_MCD:
+        model = EllipticEnvelope(contamination=contamination, random_state=random_state)
+    else:
+        return mask
+
+    preds = model.fit_predict(complete.values)  # -1 = outlier, 1 = inlier
+    mask.loc[complete.index] = preds == -1
+    return mask
+
+
 def detect_clipping(series: pd.Series, min_pct: float = 0.02) -> dict:
     if not pd.api.types.is_numeric_dtype(series):
         return {"clipped_low": 0, "clipped_high": 0}
@@ -233,6 +346,19 @@ def auto_classify_columns(df: pd.DataFrame) -> dict:
         issues: list[str] = []
         reason = ""
 
+        # Object column that is really a numeric sensor channel with stray text:
+        # classify/analyse it using the coerced values (text entries become NaN,
+        # which the missing-value handling below then picks up and flags).
+        n_coerce_bad = 0
+        if coltype == TYPE_NUMERIC and _is_stringlike_dtype(series):
+            coerced, n_coerce_bad = coerce_numeric(series)
+            if coerced is not None:
+                series = coerced
+            if n_coerce_bad > 0:
+                issues.append(
+                    f"{n_coerce_bad} non-numeric value(s) - will become NaN on Apply"
+                )
+
         # ── Slam-dunk role assignments ────────────────────────────────────────
         if coltype == TYPE_DATETIME:
             suggested = ROLE_TIMESTAMP
@@ -242,10 +368,35 @@ def auto_classify_columns(df: pd.DataFrame) -> dict:
             suggested = ROLE_EXCLUDE
             reason    = "Non-numeric string - incompatible with regression workflow"
 
-        elif _is_likely_id(series):
-            suggested = ROLE_EXCLUDE
-            reason    = "Monotonic integer - likely a record ID"
-            issues.append("Likely record ID")
+        elif (_cs := _constant_step_info(series))[0]:
+            _, step, first = _cs
+            if _looks_time_named(col):
+                # A regularly-sampled time axis: valid input or timestamp, not an ID
+                suggested = ROLE_TIMESTAMP
+                reason    = f"Constant sample interval ({step:g}) - looks like a time axis"
+            else:
+                # Constant step (including the classic 0- or 1-based counter:
+                # 0,1,2,... or 1,2,3,...) — defaults to Input with a review flag
+                # rather than auto-Exclude, even for the counter-shaped case: a
+                # step-1-from-0/1 column is OFTEN a record ID, but can just as
+                # easily be a genuine feature that coincidentally starts there
+                # (e.g. "Stage Number"), and drop_excluded=True by default meant
+                # auto-Exclude here was silent data loss on a coincidence, not a
+                # slam dunk. No naming heuristic (e.g. checking for "id" in the
+                # column name) is used to disambiguate — a real "Batch Number" or
+                # "Run Count" feature could just as easily false-positive on that,
+                # so it isn't a more reliable signal than just asking the user.
+                suggested = ROLE_INPUT
+                if step == 1.0 and first in (0.0, 1.0):
+                    issues.append(
+                        f"Monotonic integer counter (step 1, starts at {first:g}) - "
+                        f"likely a record ID, but could be a genuine feature; review role"
+                    )
+                else:
+                    issues.append(
+                        f"Monotonic constant-step column (step {step:g}) - "
+                        f"could be a time axis or record ID; review role"
+                    )
 
         elif _is_zero_variance(series):
             suggested = ROLE_EXCLUDE
@@ -346,8 +497,15 @@ def apply_cleaning(
     stuck_action:      str   = ACTION_NONE,
     drop_excluded:     bool  = True,
     remove_duplicates: bool  = False,
+    random_state:      int | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     result = df.copy()
+    # Deep-copied so a failed timestamp conversion below (which reassigns a column's
+    # role to Exclude) can't mutate the CALLER's col_info in place — the UI reuses the
+    # same col_info object across repeated Apply calls and across datasets in a
+    # session, so without this a stale Exclude from one failed run would silently
+    # carry forward into every later one (found via a systematic failure-mode sweep).
+    col_info = copy.deepcopy(col_info)
     log: list[str] = []
     rows_before   = len(result)
     cols_excluded = 0
@@ -374,6 +532,26 @@ def apply_cleaning(
         except Exception as exc:
             log.append(f"[WARN] '{col}': could not convert datetime - {exc}")
             col_info[col]["role"] = ROLE_EXCLUDE
+
+    # ── 1b. Coerce mostly-numeric text columns ────────────────────────────────
+    # Real sensor exports often have one stray text entry ("error", "----") that
+    # makes pandas type the whole channel as object. Convert those columns to
+    # numeric here (stray text -> NaN) so the numeric steps below can see them;
+    # the missing-value handling in step 5 then deals with the NaNs.
+    for col in result.columns:
+        if not _is_stringlike_dtype(result[col]):
+            continue
+        if col_info.get(col, {}).get("role") == ROLE_EXCLUDE:
+            continue
+        if col_info.get(col, {}).get("role") == ROLE_TIMESTAMP:
+            continue
+        coerced, n_bad = coerce_numeric(result[col])
+        if coerced is not None:
+            result[col] = coerced
+            log.append(
+                f"[CONV] '{col}': text -> numeric"
+                + (f" ({n_bad} unparseable value(s) -> NaN)" if n_bad else "")
+            )
 
     # ── 2. Drop excluded columns ──────────────────────────────────────────────
     if drop_excluded:
@@ -421,7 +599,62 @@ def apply_cleaning(
                 log.append(f"[FIX ] '{col}': {n_affected} stuck rows removed")
 
     # ── 4. Handle outliers ────────────────────────────────────────────────────
-    if outlier_method != OUTLIER_NONE and outlier_action != ACTION_NONE:
+    if outlier_method in MULTIVARIATE_OUTLIER_METHODS and outlier_action != ACTION_NONE:
+        # These methods score the joint feature space and return a row-level
+        # mask directly, rather than running column-by-column.
+        feature_cols = [
+            c for c, info in col_info.items()
+            if info.get("role") == ROLE_INPUT
+            and c in result.columns
+            and pd.api.types.is_numeric_dtype(result[c])
+        ]
+        if not feature_cols:
+            log.append(
+                f"[WARN] '{outlier_method}': no numeric Input-role columns available - skipped"
+            )
+        else:
+            # outlier_threshold is shared with IQR (~1.5) and Percentage (~95.0), but
+            # this method needs a fraction in (0, 0.5] (sklearn's contamination) — a
+            # value left over from switching methods would otherwise crash with a raw
+            # sklearn error instead of this codebase's usual friendly handling.
+            mv_contamination = outlier_threshold
+            if not (0 < mv_contamination <= 0.5):
+                mv_contamination = min(max(mv_contamination, 1e-4), 0.5)
+                log.append(
+                    f"[WARN] '{outlier_method}': threshold {outlier_threshold:g} is out of "
+                    f"range for this method (needs 0-0.5, it's a fraction of rows) - using "
+                    f"{mv_contamination:g} instead"
+                )
+            mask = detect_outliers_multivariate(
+                result[feature_cols], outlier_method, contamination=mv_contamination,
+                random_state=random_state,
+            )
+            n_out = int(mask.sum())
+            if n_out > 0:
+                if outlier_action == ACTION_REMOVE:
+                    result = result[~mask]
+                    log.append(
+                        f"[FIX ] {n_out} outlier rows removed ({outlier_method}, "
+                        f"multivariate over {len(feature_cols)} feature column(s))"
+                    )
+                elif outlier_action == ACTION_INTERP:
+                    for c in feature_cols:
+                        result.loc[mask, c] = np.nan
+                    result[feature_cols] = result[feature_cols].interpolate(
+                        method="linear", limit_direction="both"
+                    )
+                    log.append(
+                        f"[FIX ] {n_out} outlier rows interpolated ({outlier_method}, "
+                        f"multivariate over {len(feature_cols)} feature column(s))"
+                    )
+                else:
+                    log.append(
+                        f"[WARN] '{outlier_method}' flagged {n_out} outlier rows but "
+                        f"action '{outlier_action}' is not supported for row-level "
+                        f"multivariate methods - no rows changed"
+                    )
+
+    elif outlier_method != OUTLIER_NONE and outlier_action != ACTION_NONE:
         rows_to_drop   = pd.Series(False, index=result.index)
         outlier_counts: dict[str, int] = {}
 
@@ -508,6 +741,14 @@ def apply_cleaning(
             log.append(
                 f"[FIX ] Missing values ({missing_action}) - {detail}{suffix}"
             )
+        else:
+            # Missing-value handling explicitly disabled — these NaNs (some possibly
+            # introduced moments ago by the text->numeric coercion in step 1b) are
+            # left exactly as-is. Log them so a later, less specific rejection
+            # downstream (e.g. load_and_preprocess_data's NaN check) isn't the
+            # user's first sign anything needs attention.
+            detail = ", ".join(f"'{c}' ({n})" for c, n in col_nan.items())
+            log.append(f"[WARN] Missing values present but action is 'None' - {detail}")
 
     # ── Summary ───────────────────────────────────────────────────────────────
     rows_after  = len(result)

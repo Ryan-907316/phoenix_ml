@@ -4,32 +4,48 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phoenix_ml_workflow"
-version = "1.1.2"
+version = "1.2.0"
 authors = [
     {name = "Ryan Cheung", email = "cheungkh@lancaster.ac.uk"}
 ]
-description = "A workflow designed for Physics-Enhanced Machine Learning in engineering applications."
+description = "An end-to-end physics-enhanced machine learning (PEML) workflow for regression problems in engineering and scientific applications, covering data cleaning, interpretability, uncertainty quantification, and automated reporting."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 keywords = [
     "machine learning",
+    "AutoML",
     "physics-enhanced machine learning",
+    "physics-informed machine learning",
     "PEML",
+    "hybrid modelling",
+    "surrogate modelling",
     "hyperparameter optimisation",
     "uncertainty quantification",
+    "conformal prediction",
     "interpretability",
+    "explainable ai",
     "SHAP",
     "partial dependence plots",
+    "sensitivity analysis",
+    "feature importance",
+    "outlier detection",
+    "regression diagnostics",
     "engineering",
     "regression",
 ]
 
 dependencies = [
-    "numpy >= 1.26.4",
-    "pandas >= 2.2.3",
-    "scipy >= 1.14.1",
-    "scikit-learn >= 1.5.2",
+    # Upper bounds on the core numerical stack are deliberate, not defensive
+    # clutter: pandas 3.0's new default string dtype and SALib's numpy-2.x
+    # incompatibility (see below) both broke phoenix_ml on their next major
+    # release with no warning, floors-only having let them in silently. Caps
+    # sit one major version above the newest version this package has actually
+    # been tested against; bump them only after verifying the next major works.
+    "numpy >= 1.26.4, < 3",
+    "pandas >= 2.2.3, < 4",
+    "scipy >= 1.14.1, < 2",
+    "scikit-learn >= 1.5.2, < 2",
     "matplotlib >= 3.9.2",
     "seaborn >= 0.13.2",
     "joblib >= 1.4.2",
@@ -47,13 +63,20 @@ dependencies = [
     "py-cpuinfo >= 9.0.0",
     "xgboost >= 2.1.2",
     "lightgbm >= 4.5.0",
+    # >=1.5 required: 1.4.x calls the ndarray.ptp() method, which numpy>=2.0
+    # removed, breaking Sobol/FAST sensitivity analysis outright. 1.5 switched
+    # to the np.ptp() function and also raised SALib's own numpy floor to
+    # >=2.0 -- previously avoided here on the (now outdated) assumption that
+    # numba couldn't support numpy 2.x; current numba supports numpy up to <2.5.
+    "SALib >= 1.5, < 2",
     "pywin32 >= 308; platform_system=='Windows'",
     "setuptools < 80",
     "openpyxl >= 3.1.0",
+    "adjustText >= 1.0",
 ]
 
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
     "Natural Language :: English",
@@ -66,7 +89,12 @@ classifiers = [
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest >= 8.0", "pytest-cov >= 5.0"]
 
 [project.scripts]
 phoenix-ml = "phoenix_ml.cli:main"
@@ -75,6 +103,7 @@ phoenix-ml = "phoenix_ml.cli:main"
 Homepage = "https://github.com/Ryan-907316/phoenix_ml"
 "Bug Tracker" = "https://github.com/Ryan-907316/phoenix_ml/issues"
 Source = "https://github.com/Ryan-907316/phoenix_ml"
+Changelog = "https://github.com/Ryan-907316/phoenix_ml/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 include-package-data = true
@@ -86,3 +115,29 @@ include = ["phoenix_ml*"]
 
 [tool.setuptools.package-data]
 phoenix_ml = ["*.json", "examples/*", "examples/**/*"]
+
+# Working artifacts that live (gitignored) in examples/ during development must
+# never ride along in a build made from the working tree: package-data globs
+# match the filesystem, not git, so without these a local `python -m build`
+# quietly bundled them (~170 KB of generated/test data).
+[tool.setuptools.exclude-package-data]
+phoenix_ml = [
+    "examples/DC_Motors_Residual_*",
+    "examples/Original Datasets/concrete.csv",
+    "examples/Results*",
+    # Both patterns needed: exclude-package-data uses fnmatch, where "**"
+    # still requires the literal "/" either side of it to be present in the
+    # matched path. "examples/**/__pycache__/*" alone silently failed to
+    # match "examples/__pycache__/*" (__pycache__ directly under examples/,
+    # zero intermediate directories) and let a .pyc leak into a real build.
+    "examples/__pycache__/*",
+    "examples/**/__pycache__/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Coverage is always measured; the scoped per-module table is printed by the
+# pytest_terminal_summary hook in tests/conftest.py (pytest-cov's own report is
+# suppressed via the empty --cov-report). Run `pytest --no-cov` to skip
+# coverage entirely (~20% faster).
+addopts = "--cov=phoenix_ml --cov-report="

@@ -14,21 +14,6 @@ import warnings
 import pandas as pd
 
 
-class SuppressLibraryLogs:
-    # Context manager to suppress stdout and stderr from noisy libraries.
-    def __enter__(self):
-        self._original_stdout = sys.stdout
-        self._original_stderr = sys.stderr
-        sys.stdout = open(os.devnull, 'w')
-        sys.stderr = open(os.devnull, 'w')
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stdout.close()
-        sys.stderr.close()
-        sys.stdout = self._original_stdout
-        sys.stderr = self._original_stderr
-
-
 def _detect_gpu():
     if _win32com is not None:
         try:
@@ -129,16 +114,9 @@ class SystemInfo:
         print(df.to_string(index=False))
 
         print(
-            "\nNote: GPU acceleration in this workflow is optimised for NVIDIA GPUs using CUDA.\n"
-            "This is because popular Machine Learning frameworks like PyTorch rely on CUDA, a proprietary technology developed by NVIDIA for GPU acceleration.\n"
-            "While there are alternative frameworks and libraries, such as ROCm for AMD GPUs or oneAPI for Intel GPUs, these are not yet universally supported or integrated in many ML workflows.\n"
-            "As a result, this workflow defaults to CUDA for GPU acceleration.\n\n"
-            "For systems with AMD GPUs, users may explore ROCm for compatibility with specific frameworks. Similarly, Intel GPU users can consider Intel oneAPI. Note that additional setup may be required to enable GPU support with these alternatives.\n"
-            "If no compatible GPU is detected, the workflow will default to using the CPU, which may significantly increase computation time.\n\n"
-            "For more details on GPU support, you can explore the following resources:\n"
-            "CUDA (NVIDIA): https://docs.nvidia.com/cuda/ \n"
-            "ROCm (AMD): https://rocm.docs.amd.com/en/latest/ \n"
-            "oneAPI (Intel): https://www.intel.com/content/www/us/en/developer/tools/oneapi/overview.html \n"
+            "\nNote: this workflow runs entirely on the CPU (scikit-learn, XGBoost, and "
+            "LightGBM are used in their CPU configurations). The GPU listed above is "
+            "informational only and is not used for training.\n"
         )
 
 

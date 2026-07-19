@@ -7,6 +7,11 @@ __pycache__/
 *.csv~
 *.log
 
+# Test artifacts
+.coverage
+.coverage.*
+htmlcov/
+
 # Build
 build/
 dist/
@@ -31,3 +36,10 @@ Results*/
 results/
 reports/
 *.pdf
+
+# Workflow-generated example artifacts (only the two source datasets,
+# the generation script, and the README are meant to ship)
+phoenix_ml/examples/DC_Motors_Residual_Dataset.csv
+phoenix_ml/examples/DC_Motors_Residual_Configuration.json
+phoenix_ml/examples/DC_Motors_Simple_Dataset.csv
+phoenix_ml/examples/Original Datasets/concrete.csv

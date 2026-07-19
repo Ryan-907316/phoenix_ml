@@ -26,7 +26,7 @@ Run the full workflow from Python::
     )
 """
 
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 
 import warnings
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)

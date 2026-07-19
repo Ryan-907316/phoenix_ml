@@ -91,3 +91,21 @@ param_spaces = {
 
 # Refer to the documentation for more information concerning hyperparameter search spaces.
 # In general, wider range is better but takes much longer.
+
+def _check_dicts_in_sync(models: dict, spaces: dict) -> None:
+    """models_dict and param_spaces are hand-synced dictionaries with nothing else
+    enforcing it — a model added to one but not the other used to fail later with a
+    confusing KeyError deep inside HPO. Raise immediately, naming exactly which
+    model(s) are missing from which dict, since this file is explicitly meant to be
+    user-editable."""
+    missing_spaces = set(models) - set(spaces)
+    missing_models = set(spaces) - set(models)
+    if missing_spaces or missing_models:
+        raise AssertionError(
+            "models.py: models_dict and param_spaces are out of sync — "
+            f"missing from param_spaces: {sorted(missing_spaces)}; "
+            f"missing from models_dict: {sorted(missing_models)}"
+        )
+
+
+_check_dicts_in_sync(models_dict, param_spaces)

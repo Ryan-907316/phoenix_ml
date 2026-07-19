@@ -1,4 +1,4 @@
-# app.py  --  launch Phoenix ML
+# app.py  --  launch phoenix_ml from the command line
 # Run this directly: python app.py
 # Or use the installed command: phoenix-ml
 

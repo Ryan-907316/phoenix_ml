@@ -1,3 +1,11 @@
 include README.md
 include LICENSE
-recursive-include examples *.csv *.md
+include CHANGELOG.md
+recursive-include phoenix_ml/examples *.csv *.md *.json *.py
+# Gitignored working artifacts that must not ride along in an sdist built from
+# the working tree (the ? in Original?Datasets stands for the space -
+# MANIFEST.in patterns cannot quote literal spaces).
+exclude phoenix_ml/examples/DC_Motors_Residual_Dataset.csv
+exclude phoenix_ml/examples/DC_Motors_Residual_Configuration.json
+exclude phoenix_ml/examples/Original?Datasets/concrete.csv
+prune phoenix_ml/examples/Results

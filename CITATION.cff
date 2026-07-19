@@ -1,0 +1,46 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it using the metadata from this file. Where possible, prefer citing the specific version you used via its Zenodo DOI (see the Zenodo badge/link in README.md).
+type: software
+title: phoenix_ml
+version: 1.2.0
+date-released: "2026-07-19"
+authors:
+  - family-names: Cheung
+    given-names: Ryan
+    email: cheungkh@lancaster.ac.uk
+    affiliation: Lancaster University
+    orcid: "https://orcid.org/0009-0004-9104-2560"
+repository-code: "https://github.com/Ryan-907316/phoenix_ml"
+url: "https://pypi.org/project/phoenix-ml-workflow/"
+abstract: >-
+  phoenix_ml (a Physics and Hybrid Optimised ENgine for Interpretability and eXplainability for Machine Learning) is a physics-enhanced machine learning (PEML) workflow package designed for regression problems in engineering and scientific applications involving real-world systems. It covers the end-to-end machine learning workflow, including built-in dataset cleaning, preprocessing, physics-informed residual learning (PERL), model training, hyperparameter optimisation, interpretability and global sensitivity analysis, uncertainty quantification, and automated PDF/Excel report generation with no additional imports required. The interface is also designed to be easy to use and highly customisable at every step of the workflow.
+keywords:
+  - machine learning
+  - AutoML
+  - physics-enhanced machine learning
+  - physics-informed machine learning
+  - PEML
+  - hybrid modelling
+  - surrogate modelling
+  - hyperparameter optimisation
+  - uncertainty quantification
+  - conformal prediction
+  - interpretability
+  - explainable ai
+  - SHAP
+  - partial dependence plots
+  - sensitivity analysis
+  - feature importance
+  - outlier detection
+  - regression diagnostics
+  - engineering
+  - regression
+license: MIT
+# Once the first GitHub Release is archived by Zenodo, add the minted
+# concept DOI here (the one that always resolves to the latest version),
+# for example:
+# identifiers:
+#   - type: doi
+#     value: 10.5281/zenodo.XXXXXXX
+#     description: The concept DOI for all versions of this software.
