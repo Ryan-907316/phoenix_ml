@@ -801,12 +801,6 @@ def add_preprocessing_section(elements, results, plot_paths, dataset_path, style
         ('BOTTOMPADDING', (0,0), (-1,-1), 3),
     ]))
     elements.append(tbl)
-    elements.append(Spacer(1, 6))
-
-    elements.append(Paragraph(
-        f"The random seed was {random_seed if random_seed is not None else 0}.",
-        styles["CustomBody"],
-    ))
     elements.append(Spacer(1, 12))
 
     # Feature list (wrapped)

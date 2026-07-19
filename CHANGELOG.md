@@ -2,6 +2,11 @@
 
 All notable user-facing changes to phoenix_ml. The full defect history with per-fix regression-test references lives in [tests/ISSUES.md](tests/ISSUES.md), but the main changes are listed here.
 
+## [1.2.1] - 2026-07-20
+
+- Fixed `import phoenix_ml` crashing on Windows with a numba `FileNotFoundError` on a fresh install whose path (a nested venv inside a descriptively-named project folder is a completely ordinary setup) pushed `dcor`'s on-disk JIT cache filename past the 260-character Windows `MAX_PATH` limit. `NUMBA_CACHE_DIR` is now redirected to a short, fixed, drive-root path by default on Windows (any cache location the user has already configured is left untouched). If you're still on v1.2.0 and hit this, it can be worked around without upgrading by running `$env:NUMBA_CACHE_DIR = "C:\nc"` in PowerShell before launching phoenix_ml.
+- Removed a redundant "The random seed was N." sentence from the Preprocessing Summary report section; the seed is already shown in the table directly above it.
+
 ## [1.2.0] - 2026-07-19
 
 The first stable release of phoenix_ml: a systematic bug-fixing, testing, and quality-of-life pass over the whole package, plus several new analysis features. This is the first release marked Production/Stable. See tests/ISSUES.md for more information.

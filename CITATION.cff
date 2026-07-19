@@ -3,8 +3,8 @@ message: >-
   If you use this software, please cite it using the metadata from this file. Where possible, prefer citing the specific version you used via its Zenodo DOI (see the Zenodo badge/link in README.md).
 type: software
 title: phoenix_ml
-version: 1.2.0
-date-released: "2026-07-19"
+version: 1.2.1
+date-released: "2026-07-20"
 authors:
   - family-names: Cheung
     given-names: Ryan
