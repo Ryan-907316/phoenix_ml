@@ -37,10 +37,7 @@ keywords:
   - engineering
   - regression
 license: MIT
-# Once the first GitHub Release is archived by Zenodo, add the minted
-# concept DOI here (the one that always resolves to the latest version),
-# for example:
-# identifiers:
-#   - type: doi
-#     value: 10.5281/zenodo.XXXXXXX
-#     description: The concept DOI for all versions of this software.
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21446067
+    description: The DOI for version 1.2.0 of phoenix_ml on Zenodo.
