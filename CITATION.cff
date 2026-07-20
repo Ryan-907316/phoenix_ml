@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: >-
-  If you use this software, please cite it using the metadata from this file. Where possible, prefer citing the specific version you used via its Zenodo DOI (see the Zenodo badge/link in README.md).
+  If you use this software, please cite it using the metadata from this file. Where possible, prefer citing the specific version you used via its Zenodo DOI (see the Zenodo badge/link in README.md). To cite the project generally, independent of version, use the concept DOI (10.5281/zenodo.21446066), which always resolves to the latest release.
 type: software
 title: phoenix_ml
 version: 1.2.1
@@ -39,5 +39,8 @@ keywords:
 license: MIT
 identifiers:
   - type: doi
-    value: 10.5281/zenodo.21446067
-    description: The DOI for version 1.2.0 of phoenix_ml on Zenodo.
+    value: 10.5281/zenodo.21446911
+    description: The DOI for version 1.2.1 of phoenix_ml on Zenodo.
+  - type: doi
+    value: 10.5281/zenodo.21446066
+    description: The concept DOI, representing all versions of phoenix_ml on Zenodo and always resolving to the latest one.

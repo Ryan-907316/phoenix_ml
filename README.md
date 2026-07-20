@@ -1,7 +1,7 @@
 # phoenix_ml
 
 ![tests](https://github.com/Ryan-907316/phoenix_ml/actions/workflows/tests.yml/badge.svg)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21446067.svg)](https://doi.org/10.5281/zenodo.21446067)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21446066.svg)](https://doi.org/10.5281/zenodo.21446066)
 
 A **P**hysics and **H**ybrid **O**ptimised **EN**gine for **I**nterpretability and e**X**plainability for **M**achine **L**earning. Intended to make the full machine learning workflow experience easier, from dataset to report.
 
@@ -148,11 +148,11 @@ This project is licensed under the MIT License: see the [LICENSE](https://github
 
 ## Citation
 
-If you use phoenix_ml in your work, please cite it. A ready-to-use APA and BibTeX citation is available via GitHub's "Cite this repository" button (top right of the repo page), generated from [CITATION.cff](CITATION.cff). Each release is also archived on Zenodo with its own DOI: see the badge above, or [10.5281/zenodo.21446067](https://doi.org/10.5281/zenodo.21446067) for v1.2.0.
+If you use phoenix_ml in your work, please cite it. A ready-to-use APA and BibTeX citation is available via GitHub's "Cite this repository" button (top right of the repo page), generated from [CITATION.cff](CITATION.cff). Each release is also archived on Zenodo with its own DOI: [10.5281/zenodo.21446911](https://doi.org/10.5281/zenodo.21446911) for v1.2.1, or [10.5281/zenodo.21446067](https://doi.org/10.5281/zenodo.21446067) for v1.2.0. The badge above uses the concept DOI ([10.5281/zenodo.21446066](https://doi.org/10.5281/zenodo.21446066)), which always resolves to the latest version.
 
 IEEE style:
 ```
-R. Cheung, "phoenix_ml," version 1.2.0, Zenodo, 2026. doi: 10.5281/zenodo.21446067.
+R. Cheung, "phoenix_ml," version 1.2.1, Zenodo, 2026. doi: 10.5281/zenodo.21446911.
 ```
 
 ## Credits
