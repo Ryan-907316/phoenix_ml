@@ -149,6 +149,7 @@ This project is licensed under the MIT License: see the [LICENSE](https://github
 If you use phoenix_ml in your work, please cite it. A ready-to-use APA and BibTeX citation is available via GitHub's "Cite this repository" button (top right of the repo page), generated from [CITATION.cff](CITATION.cff). Each release is also archived on Zenodo with its own DOI: 
 
 For v1.2.2: [10.5281/zenodo.21615895](https://doi.org/10.5281/zenodo.21615895)
+
 For v1.2.1: [10.5281/zenodo.21446911](https://doi.org/10.5281/zenodo.21446911).
 
 phoenix_ml's concept DOI: ([10.5281/zenodo.21446066](https://doi.org/10.5281/zenodo.21446066)), which always resolves to the latest version.
