@@ -39,8 +39,8 @@ keywords:
 license: MIT
 identifiers:
   - type: doi
-    value: 10.5281/zenodo.21446911
-    description: The DOI for version 1.2.1 of phoenix_ml on Zenodo.
+    value: 10.5281/zenodo.21615895
+    description: The DOI for version 1.2.2 of phoenix_ml on Zenodo.
   - type: doi
     value: 10.5281/zenodo.21446066
     description: The concept DOI, representing all versions of phoenix_ml on Zenodo and always resolving to the latest one.
