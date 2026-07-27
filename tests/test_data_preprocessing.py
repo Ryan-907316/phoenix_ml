@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from phoenix_ml.data_preprocessing import load_and_preprocess_data, plot_features_vs_targets
+from phoenix_ml.data_preprocessing import load_and_preprocess_data, plot_features_vs_targets, plot_target_vs_target
 
 
 def _write_csv(tmp_path, df, name="data.csv"):
@@ -99,6 +99,56 @@ def test_invalid_split_method_raises(tmp_path):
                                  target_columns=["y"])
 
 
+def test_systematic_split_picks_evenly_spaced_centered_rows(tmp_path):
+    """Centered-offset stride (not literal index 0) -- starting exactly at 0
+    would force the very first row into the test set every time (and, for a
+    stride that divides the length evenly, the very last row too), duplicating
+    what First/Last already do at the boundaries instead of spreading evenly."""
+    path = _write_csv(tmp_path, _clean_df(n=10))
+    _, _, X_test, *_ = load_and_preprocess_data(
+        path, test_size=0.2, split_method="systematic", target_columns=["y"])
+    assert list(X_test["f1"]) == [2.0, 7.0]
+
+
+def test_systematic_split_handles_a_test_size_that_does_not_divide_evenly(tmp_path):
+    path = _write_csv(tmp_path, _clean_df(n=10))
+    _, _, X_test, *_ = load_and_preprocess_data(
+        path, test_size=0.3, split_method="systematic", target_columns=["y"])
+    assert list(X_test["f1"]) == [1.0, 5.0, 8.0]
+
+
+def test_stratified_split_represents_the_minority_region_in_both_train_and_test(tmp_path):
+    """A skewed target (90 low values, 10 high values) is exactly the case a
+    plain random split can accidentally get wrong on a small sample -- the
+    minority region should appear in both train and test, not be missed
+    entirely from one side."""
+    rng = np.random.default_rng(0)
+    y = np.concatenate([np.zeros(90), np.full(10, 100.0)])
+    df = pd.DataFrame({"f1": np.arange(100.0), "y": y})
+    path = _write_csv(tmp_path, df, name="skewed.csv")
+    _, _, X_test, y_train, y_test, *_ = load_and_preprocess_data(
+        path, test_size=0.2, split_method="stratified", target_columns=["y"], random_state=0)
+    assert (y_test["y"] == 100.0).sum() > 0
+    assert (y_train["y"] == 100.0).sum() > 0
+
+
+def test_stratified_split_requires_exactly_one_target_column(tmp_path):
+    df = pd.DataFrame({
+        "f1": np.arange(20.0), "y1": np.arange(20.0), "y2": np.arange(20.0) * 2,
+    })
+    path = _write_csv(tmp_path, df, name="multi_target.csv")
+    with pytest.raises(ValueError, match="stratified"):
+        load_and_preprocess_data(path, test_size=0.2, split_method="stratified",
+                                 target_columns=["y1", "y2"])
+
+
+def test_stratified_split_raises_a_clear_error_when_too_few_rows(tmp_path):
+    path = _write_csv(tmp_path, _clean_df(n=5))
+    with pytest.raises(ValueError, match="stratified"):
+        load_and_preprocess_data(path, test_size=0.2, split_method="stratified",
+                                 target_columns=["y"])
+
+
 def test_non_numeric_feature_column_raises_and_names_it(tmp_path):
     df = _clean_df()
     df["sensor_id"] = ["A"] * len(df)
@@ -152,7 +202,7 @@ def test_test_size_out_of_range_raises_for_first_and_last_split(tmp_path):
     silently clamp ANY value into an almost-empty split with no error at all —
     a user typing 50 meaning "50%" got a 1-row training set, silently."""
     path = _write_csv(tmp_path, _clean_df())
-    for method in ("first", "last"):
+    for method in ("first", "last", "systematic"):
         with pytest.raises(ValueError, match="test_size"):
             load_and_preprocess_data(
                 path, test_size=50, split_method=method, target_columns=["y"])
@@ -171,6 +221,43 @@ def test_test_size_boundary_values_still_clamp_not_raise(tmp_path):
     df, X_train, X_test, *_ = load_and_preprocess_data(
         path, test_size=1.0, split_method="first", target_columns=["y"])
     assert len(X_train) >= 1
+
+
+def _targets_df(n, cols):
+    rng = np.random.default_rng(0)
+    return pd.DataFrame({c: rng.uniform(0, 1, n) for c in cols})
+
+
+def test_plot_target_vs_target_returns_empty_list_with_fewer_than_2_targets():
+    y = _targets_df(5, ["a"])
+    assert plot_target_vs_target(y, y, ["a"]) == []
+
+
+def test_plot_target_vs_target_makes_one_plot_for_2_targets():
+    y = _targets_df(5, ["a", "b"])
+    figs = plot_target_vs_target(y, y, ["a", "b"])
+    assert len(figs) == 1
+    assert len(figs[0].axes) == 1  # C(2,2) = 1 pair -> 1 subplot
+
+
+def test_plot_target_vs_target_produces_n_choose_2_pairs_arranged_3_per_row():
+    """User-requested: every pair of targets should get its own plot (n choose 2
+    pairs for n targets: 3 targets -> 3 plots, 4 -> 6, 5 -> 10), arranged 3 per
+    row rather than only ever plotting the first two targets against each other."""
+    import math
+
+    for n_targets, expected_pairs in [(3, 3), (4, 6), (5, 10)]:
+        cols = [f"t{i}" for i in range(n_targets)]
+        y = _targets_df(6, cols)
+        assert expected_pairs == math.comb(n_targets, 2)
+        figs = plot_target_vs_target(y, y, cols)
+        # Trailing unused grid cells (when pairs isn't a multiple of 3) are turned
+        # off via ax.axis("off") but still exist as Axes objects -- has_data()
+        # distinguishes an actually-plotted pair from an empty padding cell.
+        plotted_axes = sum(1 for fig in figs for ax in fig.axes if ax.has_data())
+        assert plotted_axes == expected_pairs
+        # 3 columns per row (not, e.g., 1 tall column of subplots).
+        assert figs[0].axes[0].get_gridspec().ncols == min(expected_pairs, 3)
 
 
 def test_plot_features_vs_targets_returns_empty_instead_of_crashing_with_zero_features():

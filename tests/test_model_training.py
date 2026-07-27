@@ -102,6 +102,14 @@ def test_reset_model_to_defaults_applies_random_state_when_supported():
     assert model.get_params()["random_state"] == 123
 
 
+def test_reset_model_to_defaults_elasticnet_applies_defaults_and_seed():
+    model = reset_model_to_defaults("ElasticNet", random_state=42)
+    params = model.get_params()
+    assert params["alpha"] == 1.0
+    assert params["l1_ratio"] == 0.5
+    assert params["random_state"] == 42
+
+
 def test_reset_model_to_defaults_resolves_none_to_seed_zero():
     """Package-wide convention (matching the HPO and UQ modules): a
     random_state of None resolves to seed 0 rather than leaving the model

@@ -601,9 +601,8 @@ def run_interpretability_analysis(
         entry = models_dict[model_name]
         # entry is either a single shared estimator ({model_name: instance} — used
         # before HPO, refit per target below) or a per-target dict ({target: instance}
-        # — used after HPO via get_all_models_tuned_per_target, where each target
-        # already has its own correctly-tuned instance and constraints are already baked
-        # in via the same session.selected -> HPO -> tuned-instance path).
+        # — used after HPO via get_all_models_tuned_per_target, which applies each
+        # target's monotonic constraint itself before returning the tuned instance).
         per_target_instances = entry if isinstance(entry, dict) else None
         tqdm.write(f"\n=== Interpretability: {model_name} ===")
 

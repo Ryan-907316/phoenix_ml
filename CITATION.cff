@@ -3,8 +3,8 @@ message: >-
   If you use this software, please cite it using the metadata from this file. Where possible, prefer citing the specific version you used via its Zenodo DOI (see the Zenodo badge/link in README.md). To cite the project generally, independent of version, use the concept DOI (10.5281/zenodo.21446066), which always resolves to the latest release.
 type: software
 title: phoenix_ml
-version: 1.2.1
-date-released: "2026-07-20"
+version: 1.2.2
+date-released: "2026-07-27"
 authors:
   - family-names: Cheung
     given-names: Ryan

@@ -61,9 +61,14 @@ _FUNCS = {
     "erf":      _erf,          # Gauss error function — useful for cumulative normal distributions
 }
 
-# Two-argument functions (atan2 only for now — separate from _FUNCS to keep validator clean)
+# Two-argument functions — separate from _FUNCS (which all take exactly one argument)
+# to keep the validator's arity check clean.
 _FUNCS_2ARG = {
     "atan2": np.arctan2,       # atan2(y, x) — full-circle arctangent, avoids quadrant ambiguity
+    "hypot": np.hypot,         # hypot(x, y) = sqrt(x^2 + y^2) — magnitude of two orthogonal components
+    "mod":   np.mod,           # mod(x, y) — remainder, sign follows the divisor (Python semantics)
+    "min":   np.minimum,       # min(x, y) — element-wise minimum (np.minimum, not the 1-arg np.min)
+    "max":   np.maximum,       # max(x, y) — element-wise maximum (np.maximum, not the 1-arg np.max)
 }
 
 _LATEX_FUNCS = {
@@ -91,6 +96,10 @@ _LATEX_FUNCS = {
 
 _LATEX_FUNCS_2ARG = {
     "atan2": lambda a, b: rf"\mathrm{{atan2}}\!\left({a},\,{b}\right)",
+    "hypot": lambda a, b: rf"\mathrm{{hypot}}\!\left({a},\,{b}\right)",
+    "mod":   lambda a, b: rf"\left({a} \bmod {b}\right)",
+    "min":   lambda a, b: rf"\min\!\left({a},\,{b}\right)",
+    "max":   lambda a, b: rf"\max\!\left({a},\,{b}\right)",
 }
 
 # Recognised symbolic constants (appear as Name nodes, not function calls)
@@ -174,7 +183,10 @@ def _validate(node: ast.AST) -> None:
         fname = node.func.id if isinstance(node.func, ast.Name) else None
         if fname in _FUNCS_2ARG:
             if len(node.args) != 2 or node.keywords:
-                raise ExpressionError(f"'{fname}' takes exactly two arguments: {fname}(y, x)")
+                # atan2 alone follows the (y, x) convention (matches np.arctan2/math.atan2);
+                # every other 2-arg function here takes its arguments in (x, y) order.
+                arg_order = "y, x" if fname == "atan2" else "x, y"
+                raise ExpressionError(f"'{fname}' takes exactly two arguments: {fname}({arg_order})")
             _validate(node.args[0]); _validate(node.args[1])
         elif fname in _FUNCS:
             if len(node.args) != 1 or node.keywords:

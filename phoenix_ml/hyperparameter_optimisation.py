@@ -77,6 +77,15 @@ def format_elapsed_time(seconds):
 
 # Centralised metrics so it's consistent across Random/Hyperopt/Skopt. ADJUSTED R^2 needs (n, p), validated here to avoid silent misuse.
 _HPO_LOWER_IS_BETTER = {"MSE", "RMSE", "MAE", "NRMSE", "MAPE"}
+# The complement, listed explicitly (not "everything not in _HPO_LOWER_IS_BETTER")
+# because run_random_search's best-row selection uses this set to validate the
+# metric name and raise a clear "Unsupported metric" error -- a blind `not in
+# _HPO_LOWER_IS_BETTER` there would silently treat a genuinely unknown/misspelled
+# metric as "maximize" instead. Every other lower/higher-is-better direction lookup
+# in this module doesn't need to validate (an unsupported metric would already have
+# failed earlier, in _compute_metric), so those may safely use `not in
+# _HPO_LOWER_IS_BETTER` directly, matching pareto_analysis.py's own _is_higher_better.
+_HPO_HIGHER_IS_BETTER = {"R^2", "ADJUSTED R^2", "Q^2", "KGE"}
 
 _METRIC_PLOT_LABEL = {
     "MSE":         "MSE",
@@ -241,7 +250,7 @@ def run_random_search(
         return params, metric_value
 
     # Run evaluations: sequential with early stopping, or parallel without
-    is_minimised = metric in _HPO_LOWER_IS_BETTER or metric == "MAE"
+    is_minimised = metric in _HPO_LOWER_IS_BETTER  # MAE already a member; kept as one check
 
     if patience is not None:
         best_es_score = np.inf if is_minimised else -np.inf
@@ -286,13 +295,18 @@ def run_random_search(
     # Determine whether to maximise or minimise the metric
     if metric in _HPO_LOWER_IS_BETTER:
         best_row = results_df.loc[results_df[metric_name].idxmin()]
-    elif metric in ["R^2", "ADJUSTED R^2", "Q^2", "KGE"]:
+    elif metric in _HPO_HIGHER_IS_BETTER:
         best_row = results_df.loc[results_df[metric_name].idxmax()]
     else:
         raise ValueError(f"Unsupported metric: {metric}")
 
-    # Extract the best parameters and metric value
-    best_params = best_row.drop([metric_name]).to_dict()
+    # Extract the best parameters and metric value. results_df mixes int and float
+    # dtype columns whenever param_space has both (true for every model except MLP
+    # Regressor) -- slicing a single row out of a mixed-dtype DataFrame silently
+    # upcasts the whole row to float64, so every integer hyperparameter (n_estimators,
+    # max_depth, ...) would otherwise come back as e.g. 823.0 and get printed with a
+    # spurious ".0" in the PDF report's hyperparameter column.
+    best_params = coerce_numeric_hyperparams(best_row.drop([metric_name]).to_dict())
     best_metric_value = best_row[metric_name]
 
     elapsed_time = time.time() - start_time
@@ -405,14 +419,14 @@ def update_best_values(tracking_lists, params, metric_value, metric_type):
     best_params, best_metric = tracking_lists
 
     # Revert the negative metric to its original value for maximisation metrics
-    metric_value = -metric_value if metric_type in ["R^2", "ADJUSTED R^2", "Q^2", "KGE"] else metric_value
+    metric_value = -metric_value if metric_type not in _HPO_LOWER_IS_BETTER else metric_value
 
     if not best_metric:
         best_params.append(params)
         best_metric.append(metric_value)
     else:
         # Update the best value based on the metric type
-        if metric_type in ["R^2", "ADJUSTED R^2", "Q^2", "KGE"]:
+        if metric_type not in _HPO_LOWER_IS_BETTER:
             if metric_value > max(best_metric):
                 best_params.append(params)
                 best_metric.append(metric_value)
@@ -462,6 +476,7 @@ def run_hyperopt_optimisation(model_name, model, param_space, evals, X_train, X_
     # evals=0 used to crash inside hyperopt with "There are no evaluation
     # tasks, cannot return argmin of task losses".
     require_int_at_least("evals", evals, minimum=1)
+    require_int_at_least("sample_size", sample_size, minimum=1)
     start_time = time.time()
     trials = Trials()
     tracking_lists = tracking()  # Tracking best parameters and metric
@@ -631,6 +646,11 @@ def run_skopt_optimisation(model_name, model, param_space, calls, X_train, X_tes
                            patience=None, min_delta=1e-4, random_state=None):
     if not _SKOPT_AVAILABLE:
         raise ImportError("scikit-optimize could not be imported.")
+    # Matches the same-purpose guard in run_random_search (n_iter)/run_hyperopt_optimisation
+    # (evals) -- calls=0 or negative used to fail deep inside gp_minimize with a much less
+    # clear message than a named validation error here.
+    require_int_at_least("calls", calls, minimum=1)
+    require_int_at_least("sample_size", sample_size, minimum=1)
     start_time = time.time()
     tracking_lists = tracking()
 
@@ -650,7 +670,7 @@ def run_skopt_optimisation(model_name, model, param_space, calls, X_train, X_tes
     with tqdm(total=calls, desc=f"Scikit-Optimize Progress for {model_name} (Target: {target_var})", unit="call") as pbar:
         def callback(res):
             pbar.update()
-            metric_value = -res.fun if metric in ["R^2", "ADJUSTED R^2", "Q^2", "KGE"] else res.fun
+            metric_value = -res.fun if metric not in _HPO_LOWER_IS_BETTER else res.fun
             param_dict = {param_name: param_value for param_name, param_value in zip(param_space.keys(), res.x)}
             tracking_lists[0].append(param_dict)
             tracking_lists[1].append(metric_value)
@@ -672,7 +692,7 @@ def run_skopt_optimisation(model_name, model, param_space, calls, X_train, X_tes
 
         results = gp_minimize(
             lambda params: -skopt_objective(params, model_name, model, X_train, X_test, y_train, y_test, target_var, metric, sample_size, random_state=random_state)
-            if metric in ["R^2", "ADJUSTED R^2", "Q^2", "KGE"] else
+            if metric not in _HPO_LOWER_IS_BETTER else
             skopt_objective(params, model_name, model, X_train, X_test, y_train, y_test, target_var, metric, sample_size, random_state=random_state),
             scikit_opt_space,
             n_calls=calls,
@@ -686,7 +706,7 @@ def run_skopt_optimisation(model_name, model, param_space, calls, X_train, X_tes
         print(f"  Early stopping at {actual_iters}/{calls} calls (no improvement > {min_delta} for {patience} steps)")
 
     best_params = {param_name: param_value for param_name, param_value in zip(param_space.keys(), results.x)}
-    best_metric_value = -results.fun if metric in ["R^2", "ADJUSTED R^2", "Q^2", "KGE"] else results.fun
+    best_metric_value = -results.fun if metric not in _HPO_LOWER_IS_BETTER else results.fun
 
     elapsed_time = time.time() - start_time
     print(f"Scikit-Optimize completed in: {format_elapsed_time(elapsed_time)}")
@@ -1013,13 +1033,16 @@ def run_all_models_optimisation(
                     elapsed_time = tracking_data["elapsed_time"]
                     
                     # Extract best-performing hyperparameters and score
-                    _lower_is_best = metric in _HPO_LOWER_IS_BETTER or metric == "MAE"
+                    _lower_is_best = metric in _HPO_LOWER_IS_BETTER  # MAE already a member; kept as one check
                     if method == "random":
                         tracking_df = tracking_data["tracking"]
                         if isinstance(tracking_df, pd.DataFrame) and not tracking_df.empty:
                             best_row = tracking_df.sort_values(metric.upper(), ascending=_lower_is_best).iloc[0]
                             best_score = best_row[metric.upper()]
-                            best_params = best_row.drop(labels=[metric.upper()]).to_dict()
+                            # Same mixed-dtype-row upcast as run_random_search's own best-row
+                            # extraction -- coerce whole-valued floats (e.g. n_estimators=823.0)
+                            # back to int so the report doesn't show a spurious ".0".
+                            best_params = coerce_numeric_hyperparams(best_row.drop(labels=[metric.upper()]).to_dict())
                         else:
                             best_score, best_params = None, None
 
@@ -1155,7 +1178,7 @@ def find_best_model_and_hyperparams(collected_results_df, metric, verbose=True):
     if metric not in metrics_dict:
         raise ValueError(f"Invalid metric '{metric}'. Choose from: {list(metrics_dict.keys())}")
 
-    is_minimized = metric in _HPO_LOWER_IS_BETTER or metric in ("MAE",)
+    is_minimized = metric in _HPO_LOWER_IS_BETTER  # MAE already a member; kept as one check
     best_models = {}
 
     # Guard: ensure required columns exist
@@ -1204,7 +1227,8 @@ def coerce_numeric_hyperparams(params_dict):
 # hyperparameters for every target), this never lets one target's tuning leak into
 # another's. Returns dict[model_name -> dict[target -> unfit instance, tuned params set]].
 def get_all_models_tuned_per_target(
-    selected_models, target_columns, metrics, params, metric_name, models_dict
+    selected_models, target_columns, metrics, params, metric_name, models_dict,
+    feature_names=None, monotonic_constraints=None,
 ):
     best_model_instances = {}
     is_minimised = metric_name in _HPO_LOWER_IS_BETTER
@@ -1237,7 +1261,18 @@ def get_all_models_tuned_per_target(
                     raw_params = ast.literal_eval(raw_params)
                 raw_params = coerce_numeric_hyperparams(raw_params)
                 model = deepcopy(models_dict[model_name])
-                per_target[target] = model.set_params(**raw_params)
+                model.set_params(**raw_params)
+                # HPO's own search never tunes monotone_constraints (it's applied
+                # directly to the shared search model, not part of param_space -- see
+                # apply_monotone_constraints_for_target's docstring), so raw_params
+                # above never carries it. Without reapplying it here, every caller of
+                # this function (After-HPO UQ and Interpretability in both workflow.py
+                # and workflow_steps.py) silently loses the user's monotonicity
+                # constraint on the reconstructed tuned instance, contradicting the
+                # constrained model that's actually persisted/deployed.
+                target_constraints = (monotonic_constraints or {}).get(target, {})
+                apply_monotone_constraints_for_target(model, model_name, feature_names, target_constraints)
+                per_target[target] = model
             else:
                 print(f"[WARN] No optimised hyperparameters found for {model_name} / {target}")
 

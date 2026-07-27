@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.svm import SVR
+from xgboost import XGBRegressor
 
 import phoenix_ml.hyperparameter_optimisation as hpo_module
 from phoenix_ml.hyperparameter_optimisation import (
@@ -117,6 +118,56 @@ def _search_data(n=20, seed=0):
     return X_train, X_test, y_train, y_test
 
 _PARAM_SPACE = {"k": {"type": "uniform", "bounds": (0.0, 1.0)}}
+
+# Mixed int + float param space, like every real model except MLP Regressor
+# (e.g. RandomForestRegressor's n_estimators/max_features) -- this is what makes
+# results_df a mixed-dtype DataFrame, which is what triggers pandas' single-row
+# upcast-to-float64 bug on the "n" column below.
+_MIXED_PARAM_SPACE = {
+    "n": {"type": "int", "bounds": (1, 1000)},
+    "k": {"type": "uniform", "bounds": (0.0, 1.0)},
+}
+
+
+class _FlatModelWithIntParam(_FlatModel):
+    def __init__(self):
+        super().__init__()
+        self.n = 1
+
+    def get_params(self, deep=True):
+        return {"k": self.k, "n": self.n}
+
+
+def test_random_search_rejects_an_unsupported_metric_with_a_clear_error():
+    """Regression test: the best-row selection's direction check must validate the
+    metric name explicitly (against a known higher-is-better set), not just take
+    the complement of _HPO_LOWER_IS_BETTER -- a blind `not in _HPO_LOWER_IS_BETTER`
+    would silently treat a genuinely unsupported/misspelled metric as "maximize"
+    instead of raising a clear, named error."""
+    X_train, X_test, y_train, y_test = _search_data()
+    with pytest.raises(ValueError, match="Unsupported metric"):
+        run_random_search(
+            _FlatModel(), _PARAM_SPACE, X_train, X_test, y_train, y_test,
+            sample_size=1000, n_iter=3, n_jobs=1, target_var="T",
+            metric="NOT_A_REAL_METRIC", sampling_method="Sobol", patience=None, random_state=0,
+        )
+
+
+def test_random_search_best_params_keeps_int_hyperparams_as_int_not_float():
+    """Regression test: results_df mixes int ("n") and float ("k") dtype columns
+    whenever param_space has both, which is true for every registered model except
+    MLP Regressor. Slicing a single best-row out of a mixed-dtype DataFrame
+    silently upcasts the whole row to float64, so an integer hyperparameter like
+    n_estimators used to come back as e.g. 823.0 and get printed with a spurious
+    ".0" in the PDF report's "Best Hyperparameters" column."""
+    X_train, X_test, y_train, y_test = _search_data()
+    _, best_params, _, _, _ = run_random_search(
+        _FlatModelWithIntParam(), _MIXED_PARAM_SPACE, X_train, X_test, y_train, y_test,
+        sample_size=1000, n_iter=5, n_jobs=1, target_var="T",
+        metric="MSE", sampling_method="Sobol", patience=None, random_state=0,
+    )
+    assert isinstance(best_params["n"], (int, np.integer))
+    assert not isinstance(best_params["n"], float)
 
 
 def test_random_search_without_patience_runs_every_iteration():
@@ -308,6 +359,44 @@ def test_skopt_patience_zero_stops_at_first_non_improving_call():
     assert es_info["actual_iters"] == 2
 
 
+# ── input validation ──────────────────────────────────────────────────────────
+#
+# Regression tests: run_random_search validates both n_iter and sample_size at
+# entry with a clear, named error. run_hyperopt_optimisation validated evals but
+# not sample_size, and run_skopt_optimisation validated neither calls nor
+# sample_size at all -- a 0/negative value used to fail deep inside hyperopt/skopt
+# with a far less clear message than the equivalent random-search case.
+
+def test_hyperopt_rejects_zero_sample_size():
+    X_train, X_test, y_train, y_test = _search_data()
+    with pytest.raises(ValueError, match="sample_size"):
+        run_hyperopt_optimisation(
+            "Gaussian Process Regressor", _FlatModel(), _ALPHA_SPACE, 5,
+            X_train, X_test, y_train, y_test, "T", "MSE", 0,
+            patience=None, random_state=0,
+        )
+
+
+def test_skopt_rejects_zero_calls():
+    X_train, X_test, y_train, y_test = _search_data()
+    with pytest.raises(ValueError, match="calls"):
+        run_skopt_optimisation(
+            "Gaussian Process Regressor", _FlatModel(), _ALPHA_SPACE, 0,
+            X_train, X_test, y_train, y_test, "T", "MSE", 1000, n_jobs=1,
+            patience=None, random_state=0,
+        )
+
+
+def test_skopt_rejects_zero_sample_size():
+    X_train, X_test, y_train, y_test = _search_data()
+    with pytest.raises(ValueError, match="sample_size"):
+        run_skopt_optimisation(
+            "Gaussian Process Regressor", _FlatModel(), _ALPHA_SPACE, 12,
+            X_train, X_test, y_train, y_test, "T", "MSE", 0, n_jobs=1,
+            patience=None, random_state=0,
+        )
+
+
 # ── per-trial failure isolation ──────────────────────────────────────────────
 #
 # Regression tests for a real risk: KNN's n_neighbors bound (1, 50) ignores
@@ -494,6 +583,43 @@ def test_stringified_hyperparameters_are_parsed_before_set_params():
         "Q^2", {"SVR (RBF)": SVR(kernel="rbf")},
     )
     assert tuned["SVR (RBF)"]["Target A"].get_params()["C"] == 3.5
+
+
+def test_monotonic_constraint_is_reapplied_to_the_tuned_after_hpo_instance():
+    """Regression test: HPO's own search never tunes monotone_constraints (it's
+    applied directly to the shared search model, not part of param_space), so the
+    winning hyperparameter dict this function reads never carries it. Without
+    passing feature_names/monotonic_constraints through and reapplying the
+    constraint here, every "After HPO" UQ/Interpretability consumer of this
+    function's output silently got an unconstrained model, contradicting the
+    constrained model that's actually persisted/deployed for the same target."""
+    metrics = {"random": {"XGBoost Regressor": {"Target A": {"Q^2": 0.9}}},
+               "hyperopt": {}, "skopt": {}}
+    params = {"random": {"XGBoost Regressor": {"Target A": {"n_estimators": 50}}},
+              "hyperopt": {}, "skopt": {}}
+    feature_names = ["f1", "f2"]
+    monotonic_constraints = {"Target A": {"f1": 1}}
+    tuned = get_all_models_tuned_per_target(
+        ["XGBoost Regressor"], ["Target A"], metrics, params,
+        "Q^2", {"XGBoost Regressor": XGBRegressor(verbosity=0)},
+        feature_names=feature_names, monotonic_constraints=monotonic_constraints,
+    )
+    got = tuned["XGBoost Regressor"]["Target A"].get_params()["monotone_constraints"]
+    assert tuple(got) == (1, 0)
+
+
+def test_no_monotonic_constraints_passed_gives_neutral_constraint_not_a_crash():
+    # feature_names/monotonic_constraints are optional (default None) -- older
+    # call sites, or a run with no constraints configured, must not crash.
+    metrics = {"random": {"XGBoost Regressor": {"Target A": {"Q^2": 0.9}}},
+               "hyperopt": {}, "skopt": {}}
+    params = {"random": {"XGBoost Regressor": {"Target A": {"n_estimators": 50}}},
+              "hyperopt": {}, "skopt": {}}
+    tuned = get_all_models_tuned_per_target(
+        ["XGBoost Regressor"], ["Target A"], metrics, params,
+        "Q^2", {"XGBoost Regressor": XGBRegressor(verbosity=0)},
+    )
+    assert tuned["XGBoost Regressor"]["Target A"].get_params()["n_estimators"] == 50
 
 
 # ── run_all_models_optimisation: per-model failure isolation ────────────────

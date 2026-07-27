@@ -6,6 +6,8 @@ accepts; the failure mode being guarded against is a kwarg slipping through to
 a splitter that rejects it (crash) or being dropped when it mattered
 (silently different CV than the user configured).
 """
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -19,10 +21,12 @@ from sklearn.model_selection import (
 
 from phoenix_ml.postprocessing import (
     _build_cv,
+    _custom_metric_scorer,
     _fit_and_get_influence,
     _get_hyperparams,
     _get_model_name,
     _pick,
+    _press_predicted_r2,
     apply_transformation,
     calculate_cooks_distance,
     compute_extended_diagnostics,
@@ -36,6 +40,7 @@ from phoenix_ml.postprocessing import (
     plot_yeo_johnson_lambda_curve,
     run_postprocessing_analysis,
     select_best_transformation_indices,
+    PRED_R2_METRIC,
     YEO_JOHNSON_NAMED_LAMBDAS,
 )
 
@@ -46,6 +51,25 @@ def test_q2_zero_variance_target_returns_nan_not_a_crash():
     y_true = np.array([5.0, 5.0, 5.0])
     y_pred = np.array([4.0, 5.0, 6.0])
     assert np.isnan(metrics_dict["Q^2"](y_true, y_pred))
+
+
+def test_custom_q2_scorer_zero_variance_returns_nan_not_fabricated_zero():
+    """Regression test: _custom_metric_scorer("Q^2") -- the separate scorer used by
+    CV, permutation importance, and LOFO importance (not metrics_dict["Q^2"] above)
+    -- used to fall back to a fabricated 0.0 on a zero-variance y, unlike every
+    other guarded metric in this same function (ADJUSTED R^2, KGE both return NaN).
+    perform_cross_validation_with_summary's own fold-size guard only catches folds
+    with <2 samples; a fold with >=2 samples that happen to be identical (zero
+    variance) still reached this scorer directly and got the fabricated 0.0 -- and
+    permutation/LOFO importance call this scorer with no fold-size guard at all."""
+    class _ConstantPredictor:
+        def predict(self, X):
+            return np.full(len(X), 4.0)
+
+    scorer = _custom_metric_scorer("Q^2")
+    y = np.array([5.0, 5.0, 5.0])  # zero variance, size 3 (would pass any size>=2 guard)
+    X = np.zeros((3, 1))
+    assert np.isnan(scorer(_ConstantPredictor(), X, y))
 
 
 # ── _build_cv ─────────────────────────────────────────────────────────────────
@@ -353,6 +377,132 @@ def test_goodness_metrics_are_not_accidentally_negated_by_cv():
     assert _cv_score("KGE") > 0.9
 
 
+# ── PRESS / Predicted R^2 ──────────────────────────────────────────────────────
+#
+# Unlike every metric above, this is not a per-fold score cross_val_score can
+# average — it requires pooling every fold's held-out residuals first, then
+# comparing against the total sum of squares once. perform_cross_validation_with_summary
+# special-cases it entirely (see PRED_R2_METRIC's module comment in postprocessing.py).
+
+def test_predicted_r2_is_close_to_1_for_a_near_perfect_linear_fit():
+    assert _cv_score(PRED_R2_METRIC) > 0.99
+
+
+def test_predicted_r2_works_with_every_cv_method_not_just_loo():
+    # Confirmed design choice: PRESS/Predicted R^2 pools out-of-fold residuals
+    # from whichever CV method is selected, not just the textbook-pure LOO case.
+    from sklearn.linear_model import LinearRegression
+    rng = np.random.default_rng(0)
+    x = rng.uniform(1, 10, 30)
+    y = 3.0 * x + rng.normal(0, 0.05, 30)
+    X_train = pd.DataFrame({"x": x})
+    y_train = pd.DataFrame({"T": y})
+
+    for cv_method, cv_args in [
+        ("LOO", {}),
+        ("K-Fold", {"n_splits": 5}),
+        ("Repeated K-Fold", {"n_splits": 5, "n_repeats": 2, "random_state": 0}),
+        ("Shuffle Split", {"n_splits": 4, "test_size": 0.25, "random_state": 0}),
+    ]:
+        result = perform_cross_validation_with_summary(
+            LinearRegression(), X_train, y_train, "T", cv_method, cv_args, PRED_R2_METRIC)
+        assert result["mean_score"] > 0.99, f"{cv_method} gave {result['mean_score']}"
+
+
+def test_predicted_r2_std_dev_is_nan_not_a_crash():
+    # Not an average of independent per-fold scores -- there is exactly one
+    # pooled value, so std dev is deliberately NaN rather than a fabricated 0.0.
+    from sklearn.linear_model import LinearRegression
+    rng = np.random.default_rng(0)
+    x = rng.uniform(1, 10, 30)
+    y = 3.0 * x + rng.normal(0, 0.05, 30)
+    X_train = pd.DataFrame({"x": x})
+    y_train = pd.DataFrame({"T": y})
+    result = perform_cross_validation_with_summary(
+        LinearRegression(), X_train, y_train, "T", "K-Fold", {"n_splits": 5}, PRED_R2_METRIC)
+    assert np.isnan(result["std_dev"])
+    assert len(result["scores"]) == 1  # a single pooled value, not one per fold
+
+
+def test_predicted_r2_matches_a_hand_rolled_loo_calculation():
+    """Correctness check independent of _press_predicted_r2's own implementation:
+    manually leave-one-out fit/predict a simple model and compute PRESS/Predicted
+    R^2 by hand, then confirm the real function agrees, rather than trusting the
+    same logic to check itself."""
+    from sklearn.linear_model import LinearRegression
+    from sklearn.model_selection import LeaveOneOut
+
+    rng = np.random.default_rng(1)
+    n = 12
+    X = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+    y = pd.Series(2.0 * X["x"].to_numpy() + rng.normal(0, 1.5, n))
+
+    manual_residuals = []
+    for i in range(n):
+        mask = np.arange(n) != i
+        model = LinearRegression().fit(X.iloc[mask], y.iloc[mask])
+        pred = model.predict(X.iloc[[i]])[0]
+        manual_residuals.append(y.iloc[i] - pred)
+    manual_press = float(np.sum(np.square(manual_residuals)))
+    manual_sst = float(np.sum((y.to_numpy() - y.mean()) ** 2))
+    expected = 1 - manual_press / manual_sst
+
+    actual = _press_predicted_r2(LinearRegression(), X, y, LeaveOneOut())
+    assert actual == pytest.approx(expected, rel=1e-9)
+
+
+def test_variance_based_metrics_raise_a_clear_error_under_loo_instead_of_nan_or_0():
+    """Regression test for a real, pre-existing gap discovered while implementing
+    Predicted R^2: R^2-style metrics are mathematically undefined for a
+    single-point test fold (sklearn returns NaN per fold under LeaveOneOut), so
+    picking CV Method=LOO with Scoring Metric=R^2/Adjusted R^2/KGE used to
+    silently produce a useless NaN "Mean Score" -- and Q^2 was worse, silently
+    reporting a fabricated 0.0 instead of even a NaN (its custom scorer's
+    zero-variance guard falls back to 0.0, unlike KGE's NaN fallback under the
+    identical condition). Now raises a clear, named error instead -- pointing at
+    Predicted R^2 as the statistically correct alternative -- rather than
+    silently returning a meaningless number. See tests/ISSUES.md."""
+    from sklearn.linear_model import LinearRegression
+    rng = np.random.default_rng(0)
+    x = rng.uniform(1, 10, 20)
+    y = 3.0 * x + rng.normal(0, 0.05, 20)
+    X_train = pd.DataFrame({"x": x})
+    y_train = pd.DataFrame({"T": y})
+    for metric in ["R^2", "ADJUSTED R^2", "KGE", "Q^2"]:
+        with pytest.raises(ValueError, match=re.escape(PRED_R2_METRIC)):
+            perform_cross_validation_with_summary(
+                LinearRegression(), X_train, y_train, "T", "LOO", {}, metric)
+    # Predicted R^2, computed the statistically correct way, is well-defined here
+    # and must not be blocked by the same guard.
+    result = perform_cross_validation_with_summary(
+        LinearRegression(), X_train, y_train, "T", "LOO", {}, PRED_R2_METRIC)
+    assert not np.isnan(result["mean_score"])
+
+
+def test_variance_based_metrics_also_raise_for_non_loo_configs_that_produce_tiny_folds():
+    """The degenerate-fold problem isn't LOO-specific -- an aggressive K-Fold
+    n_splits relative to n_train can produce a single-sample fold too, and
+    sklearn's remainder distribution means the smallest fold isn't always the
+    first one, so every fold must be checked, not just one."""
+    from sklearn.linear_model import LinearRegression
+    rng = np.random.default_rng(0)
+    x = rng.uniform(1, 10, 5)
+    y = 3.0 * x + rng.normal(0, 0.05, 5)
+    X_train = pd.DataFrame({"x": x})
+    y_train = pd.DataFrame({"T": y})
+    # 5 rows split 3 ways -> fold sizes [2, 2, 1] -- the smallest fold (1) is
+    # the LAST one sklearn's KFold produces, not the first.
+    with pytest.raises(ValueError, match=re.escape(PRED_R2_METRIC)):
+        perform_cross_validation_with_summary(
+            LinearRegression(), X_train, y_train, "T", "K-Fold", {"n_splits": 3}, "R^2")
+
+
+def test_variance_based_metrics_still_work_fine_with_well_posed_cv_folds():
+    # The guard must not become a false-positive trap for perfectly normal
+    # configurations where every fold has plenty of test samples.
+    assert _cv_score("R^2") > 0.99
+
+
 # ── permutation / LOFO importance ─────────────────────────────────────────────
 
 def _importance_inputs(n=40, seed=0):
@@ -467,6 +617,29 @@ def test_lofo_importance_supports_custom_scoring_metrics():
     assert imp["signal"] > imp["noise"]
 
 
+def test_permutation_importance_falls_back_to_r2_for_predicted_r2_with_a_warning(capsys):
+    # PRESS/Predicted R^2 needs a genuine CV loop; permutation importance
+    # evaluates on one fixed held-out set, so there's no fold structure to pool
+    # residuals across. Must fall back loudly (a logged [WARN]), not silently.
+    best_models, X_train, X_test, y_train, y_test, feats = _importance_inputs()
+    result = compute_permutation_importance(
+        best_models, X_train, X_test, y_train, y_test, feats,
+        scoring_metric=PRED_R2_METRIC, n_repeats=5, random_state=3)
+    assert result["T"]["scoring_metric"] == "R^2"
+    out = capsys.readouterr().out
+    assert "[WARN]" in out and PRED_R2_METRIC in out
+
+
+def test_lofo_importance_falls_back_to_r2_for_predicted_r2_with_a_warning(capsys):
+    best_models, X_train, X_test, y_train, y_test, feats = _importance_inputs()
+    result = compute_lofo_importance(
+        best_models, X_train, X_test, y_train, y_test, feats,
+        scoring_metric=PRED_R2_METRIC, random_state=3)
+    assert result["T"]["scoring_metric"] == "R^2"
+    out = capsys.readouterr().out
+    assert "[WARN]" in out and PRED_R2_METRIC in out
+
+
 # ── OLS influence diagnostics: rank-deficiency warning ───────────────────────
 #
 # Regression tests for a real risk: sm.OLS(...).fit() defaults to a pinv fit,
@@ -561,6 +734,32 @@ def test_compute_extended_diagnostics_returns_one_row_per_target_with_every_test
                 "Outliers |t|>3 (%)", "BP p-value", "White p-value",
                 "Durbin-Watson", "LB p-value (lag 10)"]:
         assert col in df.columns
+
+
+def test_dffits_threshold_uses_p_plus_1_matching_the_leverage_threshold():
+    """Regression test: DFFITS' cutoff (Belsley/Kuh/Welsch; NIST Engineering
+    Statistics Handbook 4.4.4.3) is 2*sqrt(k/n) using the SAME parameter count k
+    (including the intercept) as the leverage cutoff 2*k/n. p here is feature count
+    EXCLUDING the intercept sm.add_constant adds, so both must use (p+1) -- DFFITS
+    previously used p alone, undercounting by one parameter and over-flagging points
+    by a factor of sqrt(p/(p+1)) relative to the correct, leverage-consistent cutoff."""
+    best_models, X_train, X_test, y_train, y_test, feats = _importance_inputs()
+    influence_data = _fit_and_get_influence(best_models, X_train, X_test, y_train, y_test)
+    n, p = influence_data["T"]["n"], influence_data["T"]["p"]
+    dffits_vals = influence_data["T"]["influence"].dffits[0]
+
+    correct_thresh = 2.0 * np.sqrt((p + 1) / n)
+    wrong_thresh = 2.0 * np.sqrt(p / n)
+    expected_pct = round(100.0 * float(np.sum(np.abs(dffits_vals) > correct_thresh)) / n, 1)
+    wrong_pct = round(100.0 * float(np.sum(np.abs(dffits_vals) > wrong_thresh)) / n, 1)
+
+    df = compute_extended_diagnostics(best_models, X_train, X_test, y_train, y_test,
+                                      influence_data=influence_data)
+    actual_pct = df.iloc[0]["DFFITS (%)"]
+    assert actual_pct == pytest.approx(expected_pct)
+    # Only a meaningful regression test if the two thresholds actually disagree on
+    # at least one point for this dataset -- otherwise it would pass either way.
+    assert wrong_pct != expected_pct or wrong_thresh != correct_thresh
 
 
 def test_plot_residuals_with_influential_points_returns_a_figure_with_a_row_per_target():

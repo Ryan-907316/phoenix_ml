@@ -71,6 +71,7 @@ default_hyperparameters = {
     "MLP Regressor": {"hidden_layer_sizes": (100,), "alpha": 0.0001, "learning_rate_init": 0.001, "max_iter": 1000},
     "KNeighbors Regressor": {"n_neighbors": 5, "p": 2},
     "Extra Trees Regressor": {"n_estimators": 100, "max_depth": None, "min_samples_split": 2},
+    "ElasticNet": {"alpha": 1.0, "l1_ratio": 0.5},
 }
 
 _MONOTONIC_CAPABLE_MODELS = ("XGBoost Regressor", "LGBM Regressor")

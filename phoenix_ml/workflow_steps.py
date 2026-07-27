@@ -37,6 +37,7 @@ from phoenix_ml.persistence import (
     build_and_fit_best_models, build_pipelines, save_models_and_artifacts,
     save_predictor, build_uq_calibrators,
 )
+from phoenix_ml.model_cards import generate_model_cards
 from phoenix_ml.pareto_analysis import run_pareto_analysis, save_pareto_plots
 from phoenix_ml.report_generation import *
 
@@ -121,6 +122,16 @@ class WorkflowSession:
     ))
 
     # HPO
+    # Synced from the Home tab's Hyperparameter Optimisation checkbox (_sync_session).
+    # Read by run_step_uq_before/run_step_interpretability_before -- at the point those
+    # steps run, HPO may not have executed yet even if it's enabled, so whether HPO
+    # actually PRODUCED results (session.hpo_results) can't be known yet; this is the
+    # earliest reliable "will HPO run this session" signal, matching how the standalone
+    # run_workflow() API's perform_hpo parameter already works. Used to label UQ/
+    # Interpretability's "before" stage as "Before HPO" (there's an "after" to contrast
+    # against) vs "Default Hyperparameters" (there isn't) -- see PIPELINE_LAYOUT's
+    # comment in ui.py for the full before/after HPO UI design this supports.
+    hpo_enabled: bool = True
     hpo_metric: str = "Q^2"
     methods_to_run: list[str] = field(default_factory=lambda: ["random", "hyperopt", "skopt"])
     sampling_method: str = "Sobol"
@@ -152,12 +163,15 @@ class WorkflowSession:
     normality_tests: list[str] = field(default_factory=lambda: ["Shapiro-Wilk", "Lilliefors", "Filiben"])
 
     # Model Deployment — which artifact files the report step writes to the Models
-    # folder. With all four off, the Models folder is never created and the report's
+    # folder. With all five off, the Models folder is never created and the report's
     # "Saved Models and Artifacts" section is omitted entirely.
     save_pipelines: bool = True
     save_metadata: bool = True
     save_bundle: bool = True
     save_predictor_file: bool = True
+    # One-page, poster-style PDF per target summarising the deployed model for a
+    # non-expert reader, saved standalone in Models/Model Cards/ -- see model_cards.py.
+    save_model_cards: bool = True
 
     # PERL Reconstruction
     perl_config_path: str = ""
@@ -232,7 +246,16 @@ class WorkflowSession:
         self.perl_results = None
         self.perl_config = None
         self.perl_output_df = None
-        self.cleaning_summary = None
+        # cleaning_summary is deliberately NOT cleared here, unlike every other field
+        # above. It's set by a separate, out-of-band UI action (the Clean tab's
+        # Export button) that necessarily happens BEFORE the user points Preprocessing
+        # at the exported file and runs it -- clearing it here made it impossible for
+        # the cleaning-removed-rows report/model-card content to ever fire in normal
+        # use, since this method always runs first. Staleness (e.g. a cleaning summary
+        # left over from a since-abandoned dataset) is already correctly handled at
+        # report time by comparing session.dataset_path against the summary's own
+        # recorded export_path (see run_step_report), which is the only check that can
+        # tell whether a survived cleaning_summary still describes the loaded dataset.
         self.metrics = {"default": {}, "random": {}, "hyperopt": {}, "skopt": {}}
         self.params  = {"default": {}, "random": {}, "hyperopt": {}, "skopt": {}}
         self.total_elapsed = 0.0
@@ -328,7 +351,7 @@ def run_step_preprocessing(session: WorkflowSession) -> None:
         scaler_type=session.scaler_type,
         random_state=(
             derive_seed(session.random_seed, SEED_OFFSET_TRAIN_TEST_SPLIT)
-            if session.split_method.lower() == "random" else None
+            if session.split_method.lower() in ("random", "stratified") else None
         ),
     )
 
@@ -354,15 +377,26 @@ def run_step_training(session: WorkflowSession) -> None:
 
 
 def run_step_uq_before(session: WorkflowSession) -> None:
-    log_step("Uncertainty Quantification (Before HPO)")
     r = session.preprocessing_results
+    # "Before HPO" is only an accurate label when there's an "after" to contrast it
+    # against -- session.hpo_enabled (synced from the Home tab's HPO checkbox) is the
+    # earliest reliable "will HPO run this session" signal available at this point
+    # (hpo_results doesn't exist yet even when HPO is enabled, since this step can run
+    # before or after it). This is baked into the returned figures' own labels (their
+    # dict keys double as figure captions) and the "Stage" column of the returned
+    # dataframe, not just a report-time-only label -- see run_step_report()'s own
+    # before_label for the report-time correction covering the rarer case where HPO
+    # was enabled here but didn't end up producing results this session (e.g. Stopped
+    # mid-run).
+    stage_label = "Before HPO" if session.hpo_enabled else "Default Hyperparameters"
+    log_step(f"Uncertainty Quantification ({stage_label})")
     df, figs = run_uncertainty_quantification(
         models_dict=session.selected,
         X_train=r["X_train_scaled"], X_test=r["X_test_scaled"],
         y_train=r["y_train"],        y_test=r["y_test"],
         target_columns=session.targets,
         model_names_to_run=session.selected_models,
-        stage_label="Before HPO", show_plots=True,
+        stage_label=stage_label, show_plots=True,
         random_state=derive_seed(session.random_seed, SEED_OFFSET_UQ_BOOTSTRAP),
         feature_names=r["feature_names"],
         monotonic_constraints=session.monotonic_constraints,
@@ -373,7 +407,8 @@ def run_step_uq_before(session: WorkflowSession) -> None:
 
 
 def run_step_interpretability_before(session: WorkflowSession) -> None:
-    log_step("Interpretability (Before HPO)")
+    stage_label = "Before HPO" if session.hpo_enabled else "Default Hyperparameters"
+    log_step(f"Interpretability ({stage_label})")
     # Mirrors run_step_uq_before: every selected model gets a metrics row (Morris/Sobol
     # + monotonicity check, cheap), but only each target's best BASELINE model gets the
     # expensive ICE/PDP/ALE/SHAP visuals — same "best per target" fallback used by
@@ -415,6 +450,7 @@ def run_step_interpretability_after(session: WorkflowSession) -> None:
         session.selected_models, session.targets,
         session.metrics, session.params,
         session.hpo_metric, session.selected,
+        feature_names=r["feature_names"], monotonic_constraints=session.monotonic_constraints,
     )
     available = [m for m in session.selected_models if m in best_instances]
     visual_model_by_target = {
@@ -537,6 +573,7 @@ def run_step_uq_after(session: WorkflowSession) -> None:
         session.selected_models, session.targets,
         session.metrics, session.params,
         session.hpo_metric, session.selected,
+        feature_names=r["feature_names"], monotonic_constraints=session.monotonic_constraints,
     )
     # Only run UQ for models that HPO successfully produced instances for
     available = [m for m in session.selected_models if m in best_instances]
@@ -569,6 +606,12 @@ def run_step_report(session: WorkflowSession) -> None:
     tr = session.training_results
     hr = session.hpo_results or {}
     is_settings = session.interpretability_settings or {}
+    # "Before HPO" is only an accurate label when there's an "after" to contrast it
+    # against -- derived from whether HPO actually produced results this session
+    # (fact), not from whether its checkbox happened to be ticked (intent, which
+    # could diverge e.g. if the run was stopped mid-HPO), matching this module's
+    # existing "derive from actual results" standard.
+    before_label = "Before HPO" if hr else "Default Hyperparameters"
 
     # Persist best models (mirrors what workflow.py does before building the PDF).
     # Which artifact files get written is governed by the Model Deployment checkboxes
@@ -577,7 +620,8 @@ def run_step_report(session: WorkflowSession) -> None:
     save_paths = {}
     best_models_per_target = None
     _save_any = (session.save_pipelines or session.save_metadata
-                 or session.save_bundle or session.save_predictor_file)
+                 or session.save_bundle or session.save_predictor_file
+                 or session.save_model_cards)
     try:
         if hr:
             best = hr["best_models_per_target"]
@@ -610,13 +654,27 @@ def run_step_report(session: WorkflowSession) -> None:
                     split_info={"method": session.split_method, "test_size": session.test_size,
                                 "train_count": len(r["X_train"]), "test_count": len(r["X_test"])},
                     extra_meta={"selected_models": session.selected_models},
-                    hpo_settings={"methods": list(session.methods_to_run),
+                    # HPO didn't run this session (hr empty) means session.methods_to_run
+                    # may just be its untouched dataclass default -- recording it anyway
+                    # would misleadingly claim those methods were used. Same reasoning as
+                    # uq_settings below, mirrored in workflow.py's standalone equivalent.
+                    hpo_settings=({"methods": list(session.methods_to_run),
                                   "sampling_method": session.sampling_method,
                                   "n_iter": session.n_iter, "evals": session.evals,
                                   "calls": session.calls, "sample_size": session.sample_size,
-                                  "n_jobs": session.n_jobs},
-                    uq_settings=session.uq_settings,
-                    interpretability_settings=is_settings,
+                                  "n_jobs": session.n_jobs} if hr else None),
+                    # Same reasoning as hpo_settings above: neither UQ nor Interpretability
+                    # necessarily ran this session just because their settings fields hold
+                    # a value (which can be stale/default when the corresponding step's
+                    # checkbox was off) -- gate on whether either stage actually produced
+                    # results, mirroring workflow.py's perform_uq/perform_interpretability checks.
+                    uq_settings=(session.uq_settings
+                                if (session.uq_before is not None or session.uq_after is not None)
+                                else None),
+                    interpretability_settings=(is_settings
+                                if (session.interpretability_before is not None
+                                    or session.interpretability_after is not None)
+                                else None),
                     cv_settings={"method": session.cv_method, "args": session.cv_args,
                                  "scoring_metric": session.scoring_metric},
                     physics_config=session.perl_config,
@@ -651,6 +709,29 @@ def run_step_report(session: WorkflowSession) -> None:
                     save_paths["predictor"] = predictor_path
                 except Exception as e:
                     log_warn(f"Deployable predictor save failed ({e}), continuing with report.")
+
+            if session.save_model_cards:
+                card_paths = generate_model_cards(
+                    best_models_per_target=best,
+                    target_columns=r["target_columns"],
+                    X_train=r.get("X_train"), X_test=r.get("X_test"),
+                    feature_names=r["feature_names"], hpo_metric=session.hpo_metric,
+                    cv_results=session.cv_results,
+                    uq_after_df=(session.uq_after[0] if session.uq_after is not None else None),
+                    uq_before_df=(session.uq_before[0] if session.uq_before is not None else None),
+                    uq_settings=session.uq_settings,
+                    cleaning_summary=session.cleaning_summary,
+                    monotonic_constraints=session.monotonic_constraints,
+                    perl_config=session.perl_config,
+                    dataset_path=session.dataset_path,
+                    random_seed=session.random_seed,
+                    split_method=session.split_method,
+                    models_dir=session.models_dir,
+                    scaler_type=session.scaler_type,
+                    log_warn=log_warn,
+                )
+                if card_paths:
+                    save_paths["model_cards"] = card_paths
     except Exception as e:
         log_warn(f"Model persistence failed ({e}), continuing with report.")
 
@@ -676,16 +757,35 @@ def run_step_report(session: WorkflowSession) -> None:
 
     if session.uq_before is not None:
         uq_df, uq_figs = session.uq_before
-        handle_uq_reporting_section(uq_df, uq_figs, "Before HPO", elements, styles,
+        # run_step_uq_before() labels its own Stage column/figure captions correctly
+        # in the common case (session.hpo_enabled, known before it runs). This
+        # corrects the two rarer cases where the baked label and the fact-based
+        # before_label above disagree by report time: HPO enabled when UQ-Before ran
+        # but never producing results this session (e.g. Stopped mid-run, or the
+        # HPO checkbox toggled off afterward) leaves "Before HPO" baked in when hr is
+        # empty; and the opposite -- UQ-Before run with HPO's checkbox off, then HPO
+        # force-run afterward via the "Run" button's forced_step mechanism (which
+        # ignores that row's Enable checkbox) -- leaves "Default Hyperparameters"
+        # baked in even though hr is now non-empty. Both directions must be corrected,
+        # not just one, or the two labels can contradict each other on the same page.
+        # Unconditional and idempotent: a no-op wherever the baked label already
+        # matches before_label.
+        _OTHER_LABEL = "Default Hyperparameters" if before_label == "Before HPO" else "Before HPO"
+        if "Stage" in uq_df.columns:
+            uq_df = uq_df.copy()
+            uq_df["Stage"] = uq_df["Stage"].replace(_OTHER_LABEL, before_label)
+        uq_figs = {k.replace(f" - {_OTHER_LABEL}", f" - {before_label}"): v
+                  for k, v in uq_figs.items()}
+        handle_uq_reporting_section(uq_df, uq_figs, before_label, elements, styles,
                                     session.images_dir,
                                     uq_settings=session.uq_settings)
 
     if session.interpretability_before is not None:
         metrics_df, figs = session.interpretability_before
         add_interpretability_section(elements, figs, styles, session.images_dir, is_settings,
-                                     n_features=len(r["feature_names"]), stage_label="Before HPO",
+                                     n_features=len(r["feature_names"]), stage_label=before_label,
                                      target_columns=r["target_columns"])
-        add_interpretability_metrics_table(elements, styles, metrics_df, stage_label="Before HPO")
+        add_interpretability_metrics_table(elements, styles, metrics_df, stage_label=before_label)
 
     if hr:
         add_hpo_summary_section(
@@ -771,6 +871,7 @@ def run_step_report(session: WorkflowSession) -> None:
         step_timings=step_timings,
         cleaning_summary=cleaning_summary,
         random_seed=session.random_seed,
+        hpo_ran=bool(hr),
     )
 
     build_pdf(doc, elements)
@@ -792,6 +893,13 @@ def run_step_report(session: WorkflowSession) -> None:
 
     try:
         xlsx_path = os.path.join(session.report_dir, "phoenix_ml Results.xlsx")
+        # Excel sheet names are hard-capped at 31 characters, so the fact-based
+        # before_label ("Default Hyperparameters", 23 chars) can't be used verbatim
+        # in "Interpretability " + before_label (41 chars, would raise) the way it
+        # already is in the PDF's prose/headings elsewhere -- use a short form for
+        # sheet names specifically, and the full label for the human-readable
+        # "Contents" description below, which has no such length limit.
+        _before_sheet = "Before HPO" if before_label == "Before HPO" else "Default HP"
         with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
             _tr = session.training_results or {}
             _tr_df = _tr.get("results_df")
@@ -803,7 +911,7 @@ def run_step_report(session: WorkflowSession) -> None:
             if (session.uq_before is not None
                     and session.uq_before[0] is not None
                     and not session.uq_before[0].empty):
-                summary_rows.append({"Sheet": "UQ Before HPO", "Contents": "Uncertainty quantification metrics before HPO"})
+                summary_rows.append({"Sheet": f"UQ {_before_sheet}", "Contents": f"Uncertainty quantification metrics ({before_label})"})
             if (session.uq_after is not None
                     and session.uq_after[0] is not None
                     and not session.uq_after[0].empty):
@@ -816,7 +924,7 @@ def run_step_report(session: WorkflowSession) -> None:
             interp_before_df = _interp_df(session.interpretability_before)
             interp_after_df  = _interp_df(session.interpretability_after)
             if interp_before_df is not None:
-                summary_rows.append({"Sheet": "Interpretability Before HPO", "Contents": "Interpretability metrics summary (top features, rank agreement) before HPO"})
+                summary_rows.append({"Sheet": f"Interpretability {_before_sheet}", "Contents": f"Interpretability metrics summary (top features, rank agreement) ({before_label})"})
             if interp_after_df is not None:
                 summary_rows.append({"Sheet": "Interpretability After HPO", "Contents": "Interpretability metrics summary (top features, rank agreement) after HPO"})
 
@@ -835,13 +943,13 @@ def run_step_report(session: WorkflowSession) -> None:
             if session.uq_before is not None:
                 uq_before_df = session.uq_before[0]
                 if uq_before_df is not None and not uq_before_df.empty:
-                    uq_before_df.to_excel(writer, sheet_name="UQ Before HPO", index=False)
+                    uq_before_df.to_excel(writer, sheet_name=f"UQ {_before_sheet}", index=False)
             if session.uq_after is not None:
                 uq_after_df = session.uq_after[0]
                 if uq_after_df is not None and not uq_after_df.empty:
                     uq_after_df.to_excel(writer, sheet_name="UQ After HPO", index=False)
             if interp_before_df is not None:
-                interp_before_df.to_excel(writer, sheet_name="Interpretability Before HPO", index=False)
+                interp_before_df.to_excel(writer, sheet_name=f"Interpretability {_before_sheet}", index=False)
             if interp_after_df is not None:
                 interp_after_df.to_excel(writer, sheet_name="Interpretability After HPO", index=False)
             if transformation_df is not None and not transformation_df.empty:

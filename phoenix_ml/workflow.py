@@ -53,6 +53,7 @@ from phoenix_ml.persistence import (
     save_predictor,
     build_uq_calibrators,
 )
+from phoenix_ml.model_cards import generate_model_cards
 from phoenix_ml.report_generation import *
 
 def _ensure_dir(p: str) -> str:
@@ -127,12 +128,15 @@ def run_workflow(
     normality_tests: list | None = None,
 
     # Model Deployment — which artifact files to write to the Models folder. With all
-    # four off, the Models folder is never created and the report's Saved Models and
+    # five off, the Models folder is never created and the report's Saved Models and
     # Artifacts section is omitted.
     save_pipelines: bool = True,
     save_metadata: bool = True,
     save_bundle: bool = True,
     save_predictor_file: bool = True,
+    # One-page, poster-style PDF per target summarising the deployed model for a
+    # non-expert reader, saved standalone in Models/Model Cards/ -- see model_cards.py.
+    save_model_cards: bool = True,
 ) -> dict:
     # Setup paths
     report_dir = _ensure_dir(os.path.join(output_dir, "Report"))
@@ -142,9 +146,16 @@ def run_workflow(
 
     pdf_path = os.path.join(report_dir, "phoenix_ml Report.pdf")
 
+    # "Before HPO" is only an accurate label when there's an "after" to contrast it
+    # against -- perform_hpo is known up front here (unlike the UI/session path,
+    # this single function call runs start to finish with a fixed configuration),
+    # so this can be decided once and used consistently everywhere the stage is
+    # labelled, rather than only at report-assembly time.
+    before_label = "Before HPO" if perform_hpo else "Default Hyperparameters"
+
     # Build the ordered list of active steps for the progress header
     _steps = ["Preprocessing", "Baseline Training"]
-    if perform_uq:               _steps.append("UQ (Before HPO)")
+    if perform_uq:               _steps.append(f"UQ ({before_label})")
     if perform_interpretability: _steps.append("Interpretability")
     if perform_hpo:              _steps.append("Hyperparameter Optimisation")
     if perform_cv:               _steps.append("Postprocessing & CV")
@@ -182,7 +193,7 @@ def run_workflow(
         split_method=split_method,
         random_state=(
             derive_seed(random_seed, SEED_OFFSET_TRAIN_TEST_SPLIT)
-            if split_method.lower() == "random" else None
+            if split_method.lower() in ("random", "stratified") else None
         ),
         scaler_type=scaler_type,
         target_columns=targets,
@@ -230,7 +241,7 @@ def run_workflow(
     # UQ before HPO
     uq_df_before, uq_figures_before = None, None
     if perform_uq:
-        _announce("UQ (Before HPO)")
+        _announce(f"UQ ({before_label})")
         uq_settings = uq_settings or dict(uq_method="Both", n_bootstrap=5, confidence_interval=95,
                                         calibration_frac=0.05, subsample_test_size=50, n_jobs=1)
         uq_df_before, uq_figures_before = run_uncertainty_quantification(
@@ -238,7 +249,7 @@ def run_workflow(
             X_train=results["X_train_scaled"], X_test=results["X_test_scaled"],
             y_train=results["y_train"], y_test=results["y_test"],
             target_columns=targets, model_names_to_run=selected_models,
-            stage_label="Before HPO", show_plots=True,
+            stage_label=before_label, show_plots=True,
             random_state=derive_seed(random_seed, SEED_OFFSET_UQ_BOOTSTRAP),
             feature_names=results["feature_names"], monotonic_constraints=monotonic_constraints,
             **uq_settings
@@ -340,7 +351,8 @@ def run_workflow(
         # Per-(model, target) tuned instances — each target gets its own correctly-tuned
         # hyperparameters, unlike the old across-targets-averaged lookup this replaced.
         best_model_instances = get_all_models_tuned_per_target(
-            selected_models, targets, metrics, params, hpo_metric, selected
+            selected_models, targets, metrics, params, hpo_metric, selected,
+            feature_names=results["feature_names"], monotonic_constraints=monotonic_constraints,
         )
         uq_df_after, uq_figures_after = run_uncertainty_quantification(
             models_dict=best_model_instances,
@@ -360,7 +372,8 @@ def run_workflow(
     # failure-mode sweep: this block previously had no try/except, unlike every other
     # persistence step in this function).
     save_paths = {}
-    _save_any = save_pipelines or save_metadata or save_bundle or save_predictor_file
+    _save_any = (save_pipelines or save_metadata or save_bundle or save_predictor_file
+                 or save_model_cards)
     pipelines_by_target = None
     if _save_any:
         try:
@@ -382,17 +395,23 @@ def run_workflow(
                         "train_count": len(results["X_train"]), "test_count": len(results["X_test"]),
                     },
                     extra_meta={"selected_models": selected_models},
-                    hpo_settings={
+                    # perform_hpo=False means HPO never ran regardless of what methods/
+                    # sampling_method the caller passed in -- recording them anyway would
+                    # misleadingly claim they were used, same reasoning as uq_settings below.
+                    hpo_settings=({
                         "methods": list(methods_to_run),
                         "sampling_method": sampling_method, "n_iter": n_iter, "evals": evals,
                         "calls": calls, "sample_size": sample_size, "n_jobs": n_jobs,
-                    },
+                    } if perform_hpo else None),
                     # perform_uq=False means UQ never ran regardless of what settings the
                     # caller passed in — recording them anyway would misleadingly claim
                     # they were used, the one settings field here not already implicitly
                     # None-means-skipped like the others.
                     uq_settings=(uq_settings if perform_uq else None),
-                    interpretability_settings=interpretability_settings,
+                    # Same reasoning as hpo_settings/uq_settings above: interpretability
+                    # never ran when perform_interpretability=False, regardless of what
+                    # settings the caller passed in.
+                    interpretability_settings=(interpretability_settings if perform_interpretability else None),
                     cv_settings={"method": cv_method, "args": cv_args, "scoring_metric": scoring_metric},
                     make_bundle=save_bundle, prefix="phoenix_ml",
                     save_pipelines=save_pipelines, save_metadata=save_metadata,
@@ -423,6 +442,28 @@ def run_workflow(
         except Exception as e:
             print(f"[WARN] Deployable predictor save failed ({e}), continuing with report.")
 
+    if save_model_cards:
+        card_paths = generate_model_cards(
+            best_models_per_target=best_models_per_target,
+            target_columns=results["target_columns"],
+            X_train=results.get("X_train"), X_test=results.get("X_test"),
+            feature_names=results["feature_names"], hpo_metric=hpo_metric,
+            cv_results=post_results,
+            uq_after_df=uq_df_after,
+            uq_before_df=uq_df_before,
+            uq_settings=(uq_settings if perform_uq else None),
+            cleaning_summary=None,
+            monotonic_constraints=monotonic_constraints,
+            perl_config=None,
+            dataset_path=dataset_path,
+            random_seed=random_seed,
+            split_method=split_method,
+            models_dir=models_dir,
+            scaler_type=scaler_type,
+        )
+        if card_paths:
+            save_paths["model_cards"] = card_paths
+
     # Report
     _announce("Report Generation")
     doc, elements, styles, filepath, summary_index = init_pdf_report(
@@ -443,13 +484,13 @@ def run_workflow(
     )
     add_model_training_table_to_report(elements, results_df, styles)
     if perform_uq and uq_df_before is not None and not uq_df_before.empty:
-        handle_uq_reporting_section(uq_df_before, uq_figures_before, "Before HPO", elements, styles, images_dir, uq_settings=uq_settings)
+        handle_uq_reporting_section(uq_df_before, uq_figures_before, before_label, elements, styles, images_dir, uq_settings=uq_settings)
 
     if perform_interpretability and interpretability_figures is not None:
         add_interpretability_section(elements, interpretability_figures, styles, images_dir, interpretability_settings,
-                                     n_features=len(results["feature_names"]), stage_label="Before HPO",
+                                     n_features=len(results["feature_names"]), stage_label=before_label,
                                      target_columns=results["target_columns"])
-        add_interpretability_metrics_table(elements, styles, interpretability_metrics_df, stage_label="Before HPO")
+        add_interpretability_metrics_table(elements, styles, interpretability_metrics_df, stage_label=before_label)
 
     if perform_hpo:
         add_hpo_summary_section(
@@ -501,6 +542,7 @@ def run_workflow(
         postprocessing_results=post_results,
         step_timings=step_timings,
         random_seed=random_seed,
+        hpo_ran=perform_hpo,
     )
 
     build_pdf(doc, elements)

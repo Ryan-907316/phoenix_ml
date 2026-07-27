@@ -29,6 +29,7 @@ _PAGE_IMG_HEIGHT = 230 * mm   # ~652 pt — one safe page-slice height for tall 
 _METRIC_DISPLAY = {
     "ADJUSTED R^2":       "Adjusted R²",
     "R^2":                "R²",
+    "PRED_R^2":           "Predicted R²",
     "Q^2":                "Q²/NSE",
     "MSE":                "MSE",
     "RMSE":               "RMSE",
@@ -44,6 +45,7 @@ _METRIC_DISPLAY = {
 _METRIC_DISPLAY_LONG = {
     "ADJUSTED R^2":       "Adjusted R²",
     "R^2":                "R² (Coefficient of Determination)",
+    "PRED_R^2":           "Predicted R² (PRESS)",
     "Q^2":                "Nash-Sutcliffe Efficiency / Q²",
     "MSE":                "Mean Squared Error (MSE)",
     "RMSE":               "Root Mean Squared Error (RMSE)",
@@ -176,6 +178,7 @@ from phoenix_ml.system_info import SystemInfo
 from phoenix_ml.data_preprocessing import *
 from phoenix_ml.interpretability import FailedPlot
 from phoenix_ml.postprocessing import select_best_transformation_indices, NORMALITY_P_THRESHOLD
+from phoenix_ml.hyperparameter_optimisation import _HPO_LOWER_IS_BETTER
 
 # Initialisation of the .pdf document
 def init_pdf_report(
@@ -270,14 +273,6 @@ def _plural(n, word, plural_word=None):
     return word if n == 1 else (plural_word or f"{word}s")
 
 
-_UQ_METHOD_NAMES = {
-    "Both": "Bootstrapping and Conformal prediction",
-    "Bootstrapping": "Bootstrapping",
-    "Conformal": "Conformal prediction",
-    "GP Posterior": "GP Posterior",
-}
-
-
 def _split_method_phrase(split_method, test_prop):
     """Plain-language description of how the test set was chosen, rather than the
     internal split_method keyword on its own (e.g. 'random', which reads as jargon
@@ -290,6 +285,10 @@ def _split_method_phrase(split_method, test_prop):
         return f"the first {pct} of rows as the test set"
     if method == "last":
         return f"the last {pct} of rows as the test set"
+    if method == "stratified":
+        return "a stratified split preserving the target's distribution across train and test"
+    if method == "systematic":
+        return "a systematic split (evenly spaced rows)"
     return f"the '{split_method}' method" if split_method else "an unspecified split method"
 
 
@@ -363,7 +362,14 @@ def _exec_dataset_group(styles, preprocessing_results, dataset_path, perl_config
             sentences.append("The dataset was cleaned before this run; see the Dataset Cleaning log for detail.")
 
     if perl_config:
-        mode_label = "Expression Mode" if perl_config.get("mode") == "expression" else "Script Mode"
+        # Matches add_perl_section's own default exactly (mode defaults to
+        # "expression" when the key is missing, not "script") -- these previously
+        # disagreed: this line's own missing-key case fell through to "Script Mode"
+        # while add_perl_section's fell through to "Expression Mode", which would
+        # have shown a genuinely contradictory PERL mode between the Executive
+        # Summary and the PERL section itself in the same report.
+        mode = perl_config.get("mode", "expression")
+        mode_label = "Expression Mode" if mode == "expression" else "Script Mode"
         sentences.append(
             f"This run used Physics-Enhanced Residual Learning (PERL) in {mode_label}, combining a "
             "physics-based estimate with a residual machine learning model for each target."
@@ -378,7 +384,7 @@ def _exec_dataset_group(styles, preprocessing_results, dataset_path, perl_config
 def _exec_modelling_group(styles, selected_model_names, results_df,
                           hpo_metric, best_models_per_target, perl_results,
                           uq_before, uq_after, uq_settings, postprocessing_results,
-                          preprocessing_results):
+                          preprocessing_results, hpo_ran=False):
     if not selected_model_names:
         return []
     out = [Paragraph("Modelling", _EXEC_LABEL_STYLE)]
@@ -411,7 +417,7 @@ def _exec_modelling_group(styles, selected_model_names, results_df,
         metric_col = next((c for c in [hpo_metric, "ADJUSTED R^2", "R^2", "RMSE"]
                            if c in results_df.columns), None)
         if metric_col:
-            lower_is_best = metric_col.upper() in {"MSE", "RMSE", "NRMSE", "MAPE", "MAE"}
+            lower_is_best = metric_col.upper() in _HPO_LOWER_IS_BETTER
             rows = [["Target Variable", "Best Model", _fmt_metric(metric_col)]]
             for target in results_df["Target Variable"].unique():
                 sub = results_df[results_df["Target Variable"] == target]
@@ -457,12 +463,19 @@ def _exec_modelling_group(styles, selected_model_names, results_df,
     # Uncertainty quantification and cross-validation: one sentence each, as supporting
     # evidence for how much the modelling result above can be trusted.
     if uq_before is not None or uq_after is not None:
-        stages = [s for s, present in (("before", uq_before is not None),
-                                       ("after", uq_after is not None)) if present]
-        stage_phrase = (_join_and(stages) + " hyperparameter optimisation") if len(stages) > 1 \
-            else f"{stages[0]} hyperparameter optimisation"
-        method = _UQ_METHOD_NAMES.get((uq_settings or {}).get("uq_method"),
-                                      (uq_settings or {}).get("uq_method", "an uncertainty"))
+        # "Before hyperparameter optimisation" is only accurate when HPO actually ran
+        # this session -- uq_after existing already implies that (it needs hpo_results
+        # to run at all), but uq_before alone does not, since it can be computed
+        # whether or not HPO is even enabled (see run_step_uq_before/hpo_enabled).
+        if uq_after is not None and uq_before is not None:
+            stage_phrase = "before and after hyperparameter optimisation"
+        elif uq_after is not None:
+            stage_phrase = "after hyperparameter optimisation"
+        elif hpo_ran:
+            stage_phrase = "before hyperparameter optimisation"
+        else:
+            stage_phrase = "using default hyperparameters"
+        method = _join_and(_uq_method_names(uq_settings))
         ci = (uq_settings or {}).get("confidence_interval", "N/A")
         out.append(Paragraph(
             f"Prediction uncertainty was quantified using {method} at a {ci}% confidence level, "
@@ -476,12 +489,22 @@ def _exec_modelling_group(styles, selected_model_names, results_df,
         scoring_metric = postprocessing_results.get("scoring_metric", "R²")
         if len(cv_df) == 1:
             r = cv_df.iloc[0]
-            out.append(Paragraph(
-                f"Cross-validation ({r['CV Method']}) gave a mean "
-                f"{_fmt_metric_long(scoring_metric)} of {float(r['Mean Score']):.4f} "
-                f"± {float(r['Std Deviation']):.4f}.",
-                styles["CustomBody"],
-            ))
+            std = float(r["Std Deviation"])
+            if pd.isna(std):
+                # Not an average of per-fold scores (e.g. Predicted R^2/PRESS, or a
+                # degenerate LOO + variance-based metric fold) -- no "mean"/"±" to show.
+                out.append(Paragraph(
+                    f"Cross-validation ({r['CV Method']}) gave a "
+                    f"{_fmt_metric_long(scoring_metric)} of {float(r['Mean Score']):.4f}.",
+                    styles["CustomBody"],
+                ))
+            else:
+                out.append(Paragraph(
+                    f"Cross-validation ({r['CV Method']}) gave a mean "
+                    f"{_fmt_metric_long(scoring_metric)} of {float(r['Mean Score']):.4f} "
+                    f"± {std:.4f}.",
+                    styles["CustomBody"],
+                ))
         else:
             out.append(Paragraph(
                 f"Cross-validation used {_fmt_metric_long(scoring_metric)} as the evaluation metric:",
@@ -489,8 +512,10 @@ def _exec_modelling_group(styles, selected_model_names, results_df,
             ))
             rows = [["Target Variable", "CV Method", "Mean Score", "Standard Deviation"]]
             for _, r in cv_df.iterrows():
+                std = float(r["Std Deviation"])
+                std_str = "N/A" if pd.isna(std) else f"{std:.4f}"
                 rows.append([str(r["Target Variable"]), str(r["CV Method"]),
-                            f"{float(r['Mean Score']):.4f}", f"{float(r['Std Deviation']):.4f}"])
+                            f"{float(r['Mean Score']):.4f}", std_str])
             out.append(Spacer(1, 3))
             out.append(_exec_table(rows, [45*mm, 40*mm, 30*mm, 30*mm]))
 
@@ -660,6 +685,7 @@ def add_executive_summary_section(
     step_timings=None,
     cleaning_summary=None,
     random_seed=None,
+    hpo_ran=False,
 ):
     """Splice a procedurally generated Executive Summary into `elements` at
     `summary_index` (the slot `init_pdf_report` reserved between the timestamp and the
@@ -684,7 +710,7 @@ def add_executive_summary_section(
         _exec_modelling_group(styles, selected_model_names, results_df,
                               hpo_metric, best_models_per_target, perl_results,
                               uq_before, uq_after, uq_settings, postprocessing_results,
-                              preprocessing_results),
+                              preprocessing_results, hpo_ran=hpo_ran),
         _exec_diagnostics_group(styles, preprocessing_results, postprocessing_results),
         _exec_computation_group(styles, step_timings),
     ):
@@ -813,8 +839,8 @@ def add_preprocessing_section(elements, results, plot_paths, dataset_path, style
     # Plot captions
     captions = {
         "Target vs Target": (
-            "Below shows a scatter plot between two (or more) targets, "
-            "separating training and test points. Black dots indicate the training data and red dots the testing data. "
+            "Below shows a scatter plot for every pair of target variables, separating training and "
+            "test points. Black dots indicate the training data and red dots the testing data."
         ),
         "_features_vs_": (
             "Feature-vs-Target scatter grid for the training data. Each subplot shows a single feature against "
@@ -1051,6 +1077,13 @@ def add_preprocessing_section(elements, results, plot_paths, dataset_path, style
                 _fvt_described = True
         elif label.startswith("Boxplots"):
             caption = captions["Boxplots"]
+        elif label.startswith("Target vs Target"):
+            # Multiple parts possible now that every target PAIR gets its own
+            # subplot (n choose 2), not just the first two targets -- same
+            # caption shown on every part, matching Boxplots' multi-part handling
+            # right above (a static description, not per-target/per-model content
+            # that would be redundant to repeat).
+            caption = captions["Target vs Target"]
         elif label.startswith("PCA Biplot"):
             if _pca_biplot_described:
                 caption = None
@@ -1176,14 +1209,13 @@ def add_model_training_table_to_report(elements, results_df, styles, max_rows=10
     data = [hdr_row] + body_rows
 
     # Per-column, per-target best-cell highlighting (green = best value in that metric for that target)
-    _LOWER_IS_BEST = {"MSE", "RMSE", "NRMSE", "MAPE", "MAE"}
     _IS_METRIC_COL = {"MSE", "RMSE", "NRMSE", "MAPE", "MAE", "R^2", "ADJUSTED R^2", "Q^2", "KGE"}
     best_cell_cmds = []
     if "Target Variable" in display_df.columns:
         for ci, col in enumerate(display_df.columns):
             if col.upper() not in _IS_METRIC_COL:
                 continue
-            lower = col.upper() in _LOWER_IS_BEST
+            lower = col.upper() in _HPO_LOWER_IS_BETTER
             for target in display_df["Target Variable"].unique():
                 mask = display_df["Target Variable"] == target
                 col_vals = pd.to_numeric(display_df.loc[mask, col], errors="coerce")
@@ -2196,12 +2228,16 @@ def add_postprocessing_section(
         cv_param_cell = ParagraphStyle(name="_CVParamCell", fontSize=7.5, leading=9, wordWrap="CJK")
         wrapped_rows = []
         for row in cv_df.itertuples(index=False):
+            # Std Deviation is NaN for scores that aren't an average of per-fold
+            # values (Predicted R^2/PRESS, or a degenerate LOO + variance-based
+            # metric fold) -- show "N/A" rather than the literal string "nan".
+            std_str = "N/A" if pd.isna(row[4]) else f"{row[4]:.4f}"
             wrapped_row = [
                 str(row[0]),  # Target Variable
                 str(row[1]),  # CV Method
                 Paragraph(str(row[2]).replace(",", ",<br/>"), cv_param_cell),  # CV Parameters with line breaks
                 f"{row[3]:.4f}",  # Mean Score
-                f"{row[4]:.4f}"   # Std Deviation
+                std_str,          # Std Deviation
             ]
             wrapped_rows.append(wrapped_row)
 
@@ -2242,9 +2278,10 @@ def add_postprocessing_section(
             "is removed. Threshold: 4/n (where n is the test set size). A high value means that "
             "observation has an outsized effect on the model as a whole.",
             "<b>DFFITS (Difference in Fits Standardised)</b>: Measures how much an observation changes "
-            "its own predicted value when removed from the fit. Threshold: 2*sqrt(p/n), where p is the "
-            "number of features. Large absolute values indicate observations that disproportionately "
-            "influence their own prediction.",
+            "its own predicted value when removed from the fit. Threshold: 2*sqrt((p+1)/n), where p is "
+            "the number of features (p+1 counts the intercept, matching the Leverage threshold below). "
+            "Large absolute values indicate observations that disproportionately influence their own "
+            "prediction.",
             "<b>Leverage</b>: Measures how far an observation is from the centre of the feature space "
             "(the diagonal of the hat matrix). Threshold: 2*(p+1)/n. High-leverage points can pull the "
             "fitted model towards them even if their residual appears small.",
@@ -2926,6 +2963,17 @@ def add_artifacts_section(elements, styles, save_paths, models_dir):
     # Bundle
     if "bundle" in save_paths:
         elements.append(Paragraph(f"<b>Bundle (.pkl):</b> {save_paths['bundle']}", styles["CustomBody"]))
+        elements.append(Spacer(1, 6))
+
+    # Model cards: one-page, non-expert-facing summaries, one per target
+    if "model_cards" in save_paths and save_paths["model_cards"]:
+        elements.append(Paragraph(
+            "<b>Model Cards (.pdf):</b> a one-page, standalone summary per target (what the model "
+            "predicts, its headline metrics, and known limitations), meant to travel with the "
+            "deployed model for a reader who only has this file, not the full report.",
+            styles["CustomBody"]))
+        for tgt, pth in save_paths["model_cards"].items():
+            elements.append(Paragraph(f"• {tgt}: {pth}", styles["CustomBody"]))
         elements.append(Spacer(1, 6))
 
 

@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-from phoenix_ml.hyperparameter_optimisation import _HPO_LOWER_IS_BETTER
+from phoenix_ml.hyperparameter_optimisation import _HPO_LOWER_IS_BETTER, _metric_label
 
 
 def _is_higher_better(metric_name: str) -> bool:
@@ -179,12 +179,10 @@ def plot_pareto_front(models, perf_values, time_values, target_var, perf_metric,
                 color='#E07818', linestyle='--', linewidth=1.5,
                 zorder=2, alpha=0.85, label='Pareto front')
 
-    _METRIC_LABEL = {
-        "MSE": "MSE", "MAE": "MAE", "RMSE": "RMSE",
-        "NRMSE": "NRMSE", "MAPE": "MAPE (%)",
-        "R^2": "R²", "ADJUSTED R^2": "Adjusted R²", "Q^2": "Q²/NSE",
-    }
-    perf_metric_label = _METRIC_LABEL.get(perf_metric, perf_metric)
+    # Reuses hyperparameter_optimisation's label dict rather than hand-duplicating it
+    # (that copy previously omitted KGE, currently harmless only because its
+    # .get(..., perf_metric) fallback happens to equal the intended label).
+    perf_metric_label = _metric_label(perf_metric)
     x_label = 'Training Time (s, log)' if use_log_x else 'Training Time (s)'
     y_label = f'{perf_metric_label} (log)' if use_log_y else perf_metric_label
     ax.set_xlabel(x_label, fontsize=11)

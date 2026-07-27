@@ -69,6 +69,40 @@ STEP_FNS = {
     "perl":                    run_step_perl,
 }
 
+# Pipeline-table VISUAL layout only -- deliberately separate from STEPS above, whose
+# flat order/keys/prereqs must never change: _run_all_steps()/_execute_chain() walk
+# STEPS in list order and permanently SKIP (not defer) any step whose prereqs aren't
+# met yet, which is exactly why "hpo" sits before "uq_after"/"interpretability_after"
+# there today. Reordering STEPS itself to group Before/After visually together would
+# silently break "Run All". This constant only controls how the table is drawn: each
+# entry is either a bare step key (rendered as today, one row) or a group marker --
+# rendered as one master row (its own checkbox, acting as an on/off gate for both
+# sub-steps beneath it -- not itself a runnable STEPS entry, so it has no Time/Status/
+# Run of its own) followed by one row holding both sub-steps side by side, each still
+# a real, independently runnable step with its own checkbox/timer/status/Run button
+# (_step_enable_vars/_step_run_btns/_step_timer_labels/_step_status_labels, keyed
+# exactly as before) -- just laid out horizontally instead of stacked. The group id
+# (first element of each group's tuple, e.g. "uq") keys self._group_master_vars.
+PIPELINE_LAYOUT = [
+    "preprocessing",
+    "training",
+    "hpo",
+    "cv",
+    ("group", "uq", "Uncertainty Quantification",
+     [("uq_before", "Before Hyperparameter Optimisation"), ("uq_after", "After Hyperparameter Optimisation")]),
+    ("group", "interpretability", "Interpretability",
+     [("interpretability_before", "Before Hyperparameter Optimisation"),
+      ("interpretability_after", "After Hyperparameter Optimisation")]),
+    "perl",
+]
+
+# Maps each Before/After sub-step key to the group id that gates it (used by
+# _refresh_buttons()'s extra_ok check and _apply_step_group_overrides()).
+_GROUP_FOR_STEP_KEY = {
+    "uq_before": "uq", "uq_after": "uq",
+    "interpretability_before": "interpretability", "interpretability_after": "interpretability",
+}
+
 STATUS_INFO = {
     "not_run":   ("gray60",  "Not Run"),
     "running":   ("#E07818", "Running..."),
@@ -660,7 +694,23 @@ class PhoenixApp(ctk.CTk):
         for item in self._clean_preview_tree.get_children():
             self._clean_preview_tree.delete(item)
 
-        issue_mask  = build_issue_mask(df, self._clean_col_info)
+        # Preview with the Apply panel's actual current settings, not IQR/1.5/10
+        # unconditionally -- otherwise a row this preview flags (or doesn't) can
+        # genuinely disagree with what clicking Apply will actually do to it.
+        try:
+            _preview_threshold = float(self._clean_outlier_thresh.get())
+        except ValueError:
+            _preview_threshold = 1.5
+        try:
+            _preview_min_run = int(self._clean_stuck_min_run.get())
+        except ValueError:
+            _preview_min_run = 10
+        issue_mask  = build_issue_mask(
+            df, self._clean_col_info,
+            outlier_method=self._clean_outlier_method.get(),
+            outlier_threshold=_preview_threshold,
+            stuck_min_run=_preview_min_run,
+        )
         filter_on   = self._clean_filter_issues.get()
         row_indices = [i for i in range(len(df)) if issue_mask.get(i, set())] \
                       if filter_on else list(range(len(df)))
@@ -1066,6 +1116,8 @@ class PhoenixApp(ctk.CTk):
                           "floor( )   ceil( )   erf( )\n"
                           "gradient( )  ← finite difference\n"
                           "atan2(y, x)  ← full-circle arctangent\n"
+                          "hypot(x, y)  ← sqrt(x² + y²)\n"
+                          "mod(x, y)    min(x, y)    max(x, y)\n"
                           "\n"
                           "Constant:   pi",
                      justify="left", anchor="w",
@@ -1195,20 +1247,45 @@ class PhoenixApp(ctk.CTk):
         except ExpressionError as e:
             expr["preview"].configure(image=None, text=f"⚠ {e}", text_color="#c0392b")
 
-    def _phys_render_latex(self, latex_str: str) -> ctk.CTkImage:
-        fig = Figure(figsize=(0.01, 0.01), dpi=200)
-        fig.text(0, 0, f"${latex_str}$", fontsize=15, color="black")
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.15, facecolor="white")
-        buf.seek(0)
-        img = Image.open(buf)
-        img.load()
-        w, h = img.size
+    def _phys_render_latex(self, latex_str: str, transparent: bool = False) -> ctk.CTkImage:
+        """transparent=True renders onto a see-through background (for inline use next
+        to a CTkLabel, e.g. the Target vs Target note) instead of the opaque white card
+        the Physics Modelling expression preview uses -- a white box around the glyph
+        would look like a rendering error sitting inline in a sentence, especially in
+        dark mode. CTkImage's light_image/dark_image already auto-switch with the
+        app's appearance mode, so transparent mode renders the glyph once in a dark
+        colour (for light backgrounds) and once in a light colour (for dark
+        backgrounds) rather than picking one fixed colour that only reads on one theme.
+        """
+        def _render(color, facecolor, alpha):
+            fig = Figure(figsize=(0.01, 0.01), dpi=200)
+            fig.patch.set_alpha(alpha)
+            fig.text(0, 0, f"${latex_str}$", fontsize=15, color=color)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.15,
+                       facecolor=facecolor, transparent=(alpha == 0))
+            buf.seek(0)
+            img = Image.open(buf)
+            img.load()
+            return img
+
+        if transparent:
+            # Same light/dark pairing _LBL_NORMAL uses for body text, so this matches
+            # surrounding text -- but as matplotlib colour strings, not customtkinter's
+            # Tk-style "grayNN" naming (matplotlib doesn't parse "gray10" the way Tk
+            # does; #1a1a1a is gray10's actual RGB value). "#DCE4EE" is a plain hex
+            # string already, valid as-is for both.
+            light_img = _render("#1a1a1a", "white", 0.0)
+            dark_img = _render(_LBL_NORMAL[1], "black", 0.0)
+        else:
+            light_img = dark_img = _render("black", "white", 1.0)
+
+        w, h = light_img.size
         scale = 30 / h
         if w * scale > 520:
             scale = 520 / w
         size = (max(1, int(w * scale)), max(1, int(h * scale)))
-        return ctk.CTkImage(light_image=img, dark_image=img, size=size)
+        return ctk.CTkImage(light_image=light_img, dark_image=dark_img, size=size)
 
     def _phys_validate_script(self):
         """Import the selected script and check it has all required exports."""
@@ -1334,9 +1411,17 @@ class PhoenixApp(ctk.CTk):
     def _setup_home_tab(self):
         tab = self.tabview.tab("Home")
         tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(3, weight=1)
+        # Row 0 (the scrollable config area) and row 2 (the log textbox, which
+        # already scrolls its own content) share leftover space; row 0 can shrink
+        # and scroll internally on a short screen instead of pushing the log
+        # header/Clear button off-screen with no way to reach them.
+        tab.rowconfigure(0, weight=1)
 
-        top = ctk.CTkFrame(tab)
+        sf = ctk.CTkScrollableFrame(tab)
+        sf.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        sf.columnconfigure(0, weight=1)
+
+        top = ctk.CTkFrame(sf)
         top.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 3))
         top.columnconfigure(1, weight=1)
 
@@ -1375,30 +1460,45 @@ class PhoenixApp(ctk.CTk):
         ).grid(row=5, column=0, columnspan=3, padx=8, pady=(0, 4), sticky="w")
 
         # Pipeline table
-        pipe = ctk.CTkFrame(tab)
+        pipe = ctk.CTkFrame(sf)
         pipe.grid(row=1, column=0, sticky="ew", padx=6, pady=3)
         pipe.columnconfigure(1, weight=1)
 
         ctk.CTkLabel(pipe, text="Workflow Steps", font=ctk.CTkFont(size=13, weight="bold")).grid(
             row=0, column=0, columnspan=5, padx=8, pady=(6, 2), sticky="w")
         ctk.CTkLabel(pipe, text="Enable", width=55).grid(row=1, column=0, padx=(8, 0))
-        ctk.CTkLabel(pipe, text="Step",   width=240, anchor="w").grid(row=1, column=1, padx=4)
+        # sticky="w": column 1 stretches to fill the window (columnconfigure weight=1
+        # below), and without this the label's own fixed-width box -- though its TEXT
+        # is left-anchored within that box -- gets centred within the wider column,
+        # drifting away from the step-name labels underneath it (which do have
+        # sticky="w" on their own .grid() calls, so they stay pinned left).
+        ctk.CTkLabel(pipe, text="Step",   width=240, anchor="w").grid(row=1, column=1, padx=4, sticky="w")
         ctk.CTkLabel(pipe, text="Time",   width=70).grid(row=1, column=2, padx=4)
         ctk.CTkLabel(pipe, text="Status", width=100).grid(row=1, column=3, padx=8)
 
         self._step_enable_vars:   dict[str, tk.BooleanVar]  = {}
         self._step_status_labels: dict[str, ctk.CTkLabel]   = {}
         self._step_run_btns:      dict[str, ctk.CTkButton]  = {}
+        self._step_name_labels:   dict[str, ctk.CTkLabel]   = {}
+        self._step_enable_checkboxes: dict[str, ctk.CTkCheckBox] = {}
 
-        for i, (key, name, _) in enumerate(STEPS):
-            r = i + 2
+        _step_display_name = {k: n for k, n, _ in STEPS}
+
+        def _add_step_row(key, label, r, indent=0, bold=True):
             # "Before HPO" passes (UQ and Interpretability) are opt-in — useful for
             # before/after comparison, but only the "After HPO" pass is strictly
             # necessary for a normal run, so default them off along with PERL.
             var = tk.BooleanVar(value=(key not in ("perl", "uq_before", "interpretability_before")))
             self._step_enable_vars[key] = var
-            ctk.CTkCheckBox(pipe, text="", variable=var, width=30).grid(row=r, column=0, padx=(12, 0), pady=3)
-            ctk.CTkLabel(pipe, text=name, width=240, anchor="w").grid(row=r, column=1, padx=4, pady=3, sticky="w")
+            cb = ctk.CTkCheckBox(pipe, text="", variable=var, width=30)
+            cb.grid(row=r, column=0, padx=(12, 0), pady=3)
+            self._step_enable_checkboxes[key] = cb
+            nlbl = ctk.CTkLabel(pipe, text=label, width=240, anchor="w",
+                                font=ctk.CTkFont(weight="bold" if bold else "normal"))
+            nlbl.grid(row=r, column=1, padx=(4 + indent, 4), pady=3, sticky="w")
+            self._step_name_labels[key] = nlbl
+            # Same fixed widths/columns every other row uses, so Time/Status line up
+            # in one readable column regardless of indent level.
             tlbl = ctk.CTkLabel(pipe, text="--", width=70)
             tlbl.grid(row=r, column=2, padx=4, pady=3)
             self._step_timer_labels[key] = tlbl
@@ -1410,8 +1510,59 @@ class PhoenixApp(ctk.CTk):
             btn.grid(row=r, column=4, padx=(4, 10), pady=3)
             self._step_run_btns[key] = btn
 
+        self._group_master_vars: dict[str, tk.BooleanVar] = {}
+
+        def _add_group_master_row(group_id, title, r):
+            # Pure on/off gate for the group -- not a STEPS entry, no Time/Status/Run
+            # of its own (see PIPELINE_LAYOUT's comment for why). Defaults on, same as
+            # every step except "before" sub-steps and PERL.
+            var = tk.BooleanVar(value=True)
+            self._group_master_vars[group_id] = var
+            ctk.CTkCheckBox(pipe, text="", variable=var, width=30).grid(
+                row=r, column=0, padx=(12, 0), pady=(8, 3))
+            ctk.CTkLabel(pipe, text=title, width=240, anchor="w",
+                        font=ctk.CTkFont(weight="bold")).grid(
+                row=r, column=1, padx=(4, 4), pady=(8, 3), sticky="w")
+            # Registered on _refresh_buttons directly, not a dedicated handler --
+            # _refresh_buttons() already applies the group/HPO overrides itself (see
+            # _apply_step_group_overrides), and a separate handler that also calls
+            # _refresh_buttons() would recurse into it.
+            var.trace_add("write", self._refresh_buttons)
+
+        # PIPELINE_LAYOUT controls only how this table is drawn (grouped visual
+        # blocks for UQ/Interpretability's Before/After sub-steps) -- it does NOT
+        # affect STEPS itself, which _run_all_steps()/_execute_chain() depend on
+        # keeping in its original flat order (see PIPELINE_LAYOUT's own comment).
+        r = 2
+        for entry in PIPELINE_LAYOUT:
+            if isinstance(entry, tuple) and entry[0] == "group":
+                _, group_id, group_title, sub_entries = entry
+                _add_group_master_row(group_id, group_title, r)
+                r += 1
+                for key, sub_label in sub_entries:
+                    _add_step_row(key, sub_label, r, indent=24, bold=False)
+                    r += 1
+            else:
+                key = entry
+                _add_step_row(key, _step_display_name[key], r)
+                r += 1
+
+        # "After HPO" only makes sense once HPO itself will actually run; "Before
+        # HPO" is mislabelled once there's no "after" to contrast it against; and
+        # each group's own master checkbox gates both of its sub-steps. All three
+        # conditions are recomputed together (see _apply_step_group_overrides, called
+        # from _refresh_buttons() itself) so there's one source of truth instead of
+        # handlers stepping on each other. Kept reactive to the HPO checkbox the same
+        # way GP Posterior/Monotonicity react to their own driving checkboxes (see
+        # _refresh_gp_posterior_state) -- registered directly on _refresh_buttons, not
+        # a dedicated handler, since a handler that itself called _refresh_buttons()
+        # would recurse into it. The initial call is deferred to the end of this
+        # method (below), since _refresh_buttons() needs run_all_btn/report_btn/etc.
+        # -- not built yet at this point in the layout.
+        self._step_enable_vars["hpo"].trace_add("write", self._refresh_buttons)
+
         # Actions
-        actions = ctk.CTkFrame(tab, fg_color="transparent")
+        actions = ctk.CTkFrame(sf, fg_color="transparent")
         actions.grid(row=2, column=0, sticky="ew", padx=6, pady=(4, 2))
         self.run_all_btn = ctk.CTkButton(actions, text="  Run All Enabled Steps",
                                          command=self._run_all_steps, width=220)
@@ -1435,31 +1586,84 @@ class PhoenixApp(ctk.CTk):
             actions, text="", font=ctk.CTkFont(size=11), text_color="#E07818")
         # Not packed until report generation starts — see _generate_report/_finish_report
 
-        # Log
+        # Log — deliberately pinned outside the scrollable frame above (on `tab`
+        # directly, not `sf`) so the Clear button and log stay reachable without
+        # scrolling past the whole config/pipeline area first; the textbox already
+        # scrolls its own content.
         log_hdr = ctk.CTkFrame(tab, fg_color="transparent")
-        log_hdr.grid(row=3, column=0, sticky="new", padx=6, pady=(4, 0))
+        log_hdr.grid(row=1, column=0, sticky="new", padx=6, pady=(4, 0))
         ctk.CTkLabel(log_hdr, text="Progress Log", font=ctk.CTkFont(weight="bold")).pack(side="left")
         ctk.CTkButton(log_hdr, text="Clear", width=60, command=self._clear_log).pack(side="right")
 
-        tab.rowconfigure(4, weight=1, minsize=120)
+        tab.rowconfigure(2, weight=1, minsize=120)
         self.log_textbox = ctk.CTkTextbox(tab, state="disabled",
                                           font=ctk.CTkFont(family="Courier New", size=11))
-        self.log_textbox.grid(row=4, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        self.log_textbox.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 6))
 
         self._refresh_buttons()
+
+    def _apply_step_group_overrides(self):
+        """Single source of truth for both gating conditions on the UQ/Interpretability
+        Before/After sub-steps, recomputed together every time either changes (rather
+        than two handlers independently fighting over the same widgets):
+        - "Before" is available whenever its group's own master checkbox is on.
+        - "After" additionally requires HPO's own checkbox to be on (it can't run
+          without HPO regardless of the group master).
+        "Before"'s label also switches to "Default Hyperparameters" when HPO is off,
+        since "Before HPO" is only an accurate label when there's an "after" to
+        contrast it against.
+
+        Called from _refresh_buttons() itself (after _set_settings_locked(), which
+        would otherwise blanket-undo these overrides the instant anything else
+        triggers a button refresh -- see _refresh_buttons()'s own comment) -- NOT
+        called independently, since it would then need to call _refresh_buttons()
+        itself to run at all (nothing else recomputes prereqs/busy state), which
+        would recurse back into _refresh_buttons().
+        """
+        if not hasattr(self, "_step_enable_vars") or "hpo" not in self._step_enable_vars:
+            return
+        hpo_on = self._step_enable_vars["hpo"].get()
+        for group_id, before_key, after_key in (
+            ("uq", "uq_before", "uq_after"),
+            ("interpretability", "interpretability_before", "interpretability_after"),
+        ):
+            group_on = self._group_master_vars[group_id].get()
+            before_enabled = group_on
+            after_enabled = group_on and hpo_on
+
+            self._step_name_labels[before_key].configure(
+                text="Before Hyperparameter Optimisation" if hpo_on else "Default Hyperparameters",
+                text_color=_LBL_NORMAL if before_enabled else _LBL_DISABLED)
+            self._step_enable_checkboxes[before_key].configure(
+                state="normal" if before_enabled else "disabled")
+            if not before_enabled:
+                self._step_enable_vars[before_key].set(False)
+
+            # Name label greys out along with the checkbox/Run button when HPO is off --
+            # previously only the checkbox/button were disabled, so "After HPO" stayed
+            # full-brightness/bold even while genuinely unavailable, an inconsistent
+            # signal next to "Before"'s label (which does grey/relabel in the same case).
+            self._step_name_labels[after_key].configure(
+                text_color=_LBL_NORMAL if after_enabled else _LBL_DISABLED)
+            self._step_enable_checkboxes[after_key].configure(
+                state="normal" if after_enabled else "disabled")
+            if not after_enabled:
+                self._step_enable_vars[after_key].set(False)
 
     # ── Models Tab ────────────────────────────────────────────────────────────
 
     def _setup_models_tab(self):
         tab = self.tabview.tab("Models")
-        ctk.CTkLabel(tab, text="Select Models", font=ctk.CTkFont(size=13, weight="bold")).grid(
+        sf = ctk.CTkScrollableFrame(tab)
+        sf.pack(fill="both", expand=True, padx=4, pady=4)
+        ctk.CTkLabel(sf, text="Select Models", font=ctk.CTkFont(size=13, weight="bold")).grid(
             row=0, column=0, columnspan=2, padx=10, pady=(10, 4), sticky="w")
 
         self._model_vars: dict[str, tk.BooleanVar] = {}
         for i, name in enumerate(ALL_MODEL_NAMES):
             var = tk.BooleanVar(value=(name in DEFAULT_ON))
             self._model_vars[name] = var
-            ctk.CTkCheckBox(tab, text=name, variable=var).grid(
+            ctk.CTkCheckBox(sf, text=name, variable=var).grid(
                 row=i + 1, column=0, padx=20, pady=3, sticky="w")
         self._model_vars["Gaussian Process Regressor"].trace_add(
             "write", self._refresh_gp_posterior_state
@@ -1468,7 +1672,7 @@ class PhoenixApp(ctk.CTk):
             self._model_vars[_mono_name].trace_add("write", self._refresh_monotonic_button_state)
 
         btn_row = len(ALL_MODEL_NAMES) + 1
-        bf = ctk.CTkFrame(tab, fg_color="transparent")
+        bf = ctk.CTkFrame(sf, fg_color="transparent")
         bf.grid(row=btn_row, column=0, padx=10, pady=8, sticky="w")
         ctk.CTkButton(bf, text="Select All",   width=110,
                       command=lambda: [v.set(True)  for v in self._model_vars.values()]).pack(side="left", padx=4)
@@ -1481,10 +1685,10 @@ class PhoenixApp(ctk.CTk):
 
         # ── Report Metrics ────────────────────────────────────────────────────
         hdr_row = btn_row + 1
-        ctk.CTkLabel(tab, text="Report Metrics",
+        ctk.CTkLabel(sf, text="Report Metrics",
                      font=ctk.CTkFont(size=13, weight="bold")).grid(
             row=hdr_row, column=0, columnspan=2, padx=10, pady=(10, 2), sticky="w")
-        ctk.CTkLabel(tab, text="Metrics shown in the PDF training table  (Excel always exports all)",
+        ctk.CTkLabel(sf, text="Metrics shown in the PDF training table  (Excel always exports all)",
                      font=ctk.CTkFont(size=11)).grid(
             row=hdr_row + 1, column=0, columnspan=2, padx=10, pady=(0, 4), sticky="w")
 
@@ -1501,7 +1705,7 @@ class PhoenixApp(ctk.CTk):
             ("Time Elapsed (s)", "Time Elapsed (s)",                          True),
         ]
         self._report_metric_vars: dict[str, tk.BooleanVar] = {}
-        cb_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        cb_frame = ctk.CTkFrame(sf, fg_color="transparent")
         cb_frame.grid(row=hdr_row + 2, column=0, columnspan=2, padx=10, pady=2, sticky="w")
         n_cols = 2
         for idx, (key, label, default) in enumerate(_report_metric_defs):
@@ -1514,27 +1718,47 @@ class PhoenixApp(ctk.CTk):
 
     def _setup_preprocessing_tab(self):
         tab = self.tabview.tab("Preprocessing")
-        tab.columnconfigure(1, weight=1)
-        self._preproc_test_size   = self._lbl_entry(tab, "Test Size:",     "0.2",   0)
-        self._preproc_split       = self._lbl_option(tab, "Split Method:",
-                                                     ["First", "Last", "Random"], 1)
-        self._preproc_split.configure(command=self._refresh_preproc_state)
-        self._preproc_scaler      = self._lbl_option(tab, "Feature Scaling:",
+        sf = ctk.CTkScrollableFrame(tab)
+        sf.pack(fill="both", expand=True, padx=4, pady=4)
+        sf.columnconfigure(1, weight=1)
+        self._preproc_test_size   = self._lbl_entry(sf, "Test Size:",     "0.2",   0)
+        self._preproc_split       = self._lbl_option(sf, "Split Method:",
+                                                     ["First", "Last", "Random", "Stratified", "Systematic"], 1)
+        self._preproc_scaler      = self._lbl_option(sf, "Feature Scaling:",
                                                      ["Standard", "MinMax", "Robust", "None"], 2)
         ctk.CTkLabel(
-            tab, text="Random split uses the Random Seed set on the Home tab.",
+            sf, text="Note: Stratified is available when there is only one target variable.",
             font=ctk.CTkFont(size=11), anchor="w", text_color=_LBL_NORMAL,
+            wraplength=460, justify="left",
         ).grid(row=3, column=0, columnspan=2, padx=10, pady=(0, 4), sticky="w")
-        self._preproc_target_vs_target   = self._lbl_check(tab, "Show Target vs Target Plot",                                    True,  4)
-        self._preproc_feat_vs_target     = self._lbl_check(tab, "Show Feature vs Target Scatter Plots",                          True,  5)
-        self._preproc_boxplots           = self._lbl_check(tab, "Show Boxplots",                                                 True,  6)
+        self._preproc_target_vs_target   = self._lbl_check(sf, "Show Target vs Target Plot",                                    True,  4)
+        _tvt_note = ctk.CTkFrame(sf, fg_color="transparent")
+        _tvt_note.grid(row=5, column=0, columnspan=2, padx=(40, 10), pady=(0, 4), sticky="w")
+        ctk.CTkLabel(
+            _tvt_note, text="Requires 2+ target variables. One plot per pair, or",
+            font=ctk.CTkFont(size=11), anchor="w", text_color=_LBL_NORMAL,
+        ).pack(side="left")
+        # Rendered via the same mathtext helper the Physics Modelling expression
+        # preview uses, rather than spelling out "3 targets -> 3 plots, 4 -> 6, ..."
+        # in prose -- a proper stacked binomial coefficient reads at a glance.
+        # transparent=True (and the light/dark text colour pairing that comes with
+        # it) so this sits inline as part of the sentence instead of showing up as
+        # an opaque white box glued onto a themed background.
+        self._tvt_binom_img = self._phys_render_latex(r"\binom{n}{2}", transparent=True)
+        ctk.CTkLabel(_tvt_note, image=self._tvt_binom_img, text="").pack(side="left", padx=(4, 4))
+        ctk.CTkLabel(
+            _tvt_note, text="plots.",
+            font=ctk.CTkFont(size=11), anchor="w", text_color=_LBL_NORMAL,
+        ).pack(side="left")
+        self._preproc_feat_vs_target     = self._lbl_check(sf, "Show Feature vs Target Scatter Plots",                          True,  6)
+        self._preproc_boxplots           = self._lbl_check(sf, "Show Boxplots",                                                 True,  7)
 
-        self._preproc_dist_corr          = self._lbl_check(tab, "Show Distance Correlation Matrix",                              True,  7)
+        self._preproc_dist_corr          = self._lbl_check(sf, "Show Distance Correlation Matrix",                              True,  8)
         self._preproc_dist_corr.trace_add("write", self._refresh_preproc_state)
 
         # Sub-options — inline/"tabbed" and indented to show they depend on the checkbox above.
-        dist_sub = ctk.CTkFrame(tab, fg_color="transparent")
-        dist_sub.grid(row=8, column=0, columnspan=2, padx=(40, 10), pady=(0, 4), sticky="w")
+        dist_sub = ctk.CTkFrame(sf, fg_color="transparent")
+        dist_sub.grid(row=9, column=0, columnspan=2, padx=(40, 10), pady=(0, 4), sticky="w")
         self._preproc_dist_dummy = tk.BooleanVar(value=True)
         self._preproc_dist_dummy_cb = ctk.CTkCheckBox(
             dist_sub, text="Include Dummy (Noise Baseline)", variable=self._preproc_dist_dummy)
@@ -1544,17 +1768,13 @@ class PhoenixApp(ctk.CTk):
             dist_sub, text="Marchenko-Pastur Denoising", variable=self._preproc_dist_mp)
         self._preproc_dist_mp_cb.pack(side="left")
 
-        self._preproc_multicollinearity  = self._lbl_check(tab, "Show Multicollinearity (VIF + Condition Number)",              True,  9)
-        ctk.CTkLabel(
-            tab, text="VIF = Variance Inflation Factor",
-            font=ctk.CTkFont(size=11), anchor="w",
-        ).grid(row=10, column=0, columnspan=2, padx=(40, 10), pady=(0, 4), sticky="w")
+        self._preproc_multicollinearity  = self._lbl_check(sf, "Show Multicollinearity (Variance Inflation Factor + Condition Number)", True, 10)
 
-        self._preproc_feat_sel           = self._lbl_check(tab, "Show Feature Selection: Advisory Flags",                       True,  11)
+        self._preproc_feat_sel           = self._lbl_check(sf, "Show Feature Selection: Advisory Flags",                       True,  11)
         self._preproc_feat_sel.trace_add("write", self._refresh_preproc_state)
         self._preproc_feat_sel_thresh_lbl, self._preproc_feat_sel_thresh = self._lbl_entry_ref(
-            tab, "    Feature Selection Redundancy Threshold:", "0.90", 12)
-        self._preproc_pca                = self._lbl_check(tab, "Show Principal Component Analysis (PCA): Scree Plot and Biplot", True,  13)
+            sf, "    Feature Selection Redundancy Threshold:", "0.90", 12)
+        self._preproc_pca                = self._lbl_check(sf, "Show Principal Component Analysis (PCA): Scree Plot and Biplot", True,  13)
         self._refresh_preproc_state()
 
     def _refresh_preproc_state(self, *_):
@@ -1573,11 +1793,13 @@ class PhoenixApp(ctk.CTk):
 
     def _setup_uq_tab(self):
         tab = self.tabview.tab("Uncertainty Quantification")
-        tab.columnconfigure(1, weight=1)
+        sf = ctk.CTkScrollableFrame(tab)
+        sf.pack(fill="both", expand=True, padx=4, pady=4)
+        sf.columnconfigure(1, weight=1)
 
         # Method selection via checkboxes (replaces single option menu)
-        ctk.CTkLabel(tab, text="Methods:", anchor="w", width=160).grid(row=0, column=0, padx=8, pady=4, sticky="w")
-        method_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        ctk.CTkLabel(sf, text="Methods:", anchor="w", width=160).grid(row=0, column=0, padx=8, pady=4, sticky="w")
+        method_frame = ctk.CTkFrame(sf, fg_color="transparent")
         method_frame.grid(row=0, column=1, sticky="w", padx=4, pady=4)
         self._uq_bootstrap_var    = tk.BooleanVar(value=True)
         self._uq_conformal_var    = tk.BooleanVar(value=True)
@@ -1594,20 +1816,22 @@ class PhoenixApp(ctk.CTk):
         self._refresh_gp_posterior_state()
 
         self._uq_n_bootstrap_lbl, self._uq_n_bootstrap = self._lbl_entry_ref(
-            tab, "Bootstrap Samples:", "200", 1)
+            sf, "Bootstrap Samples:", "200", 1)
         self._uq_n_jobs_lbl, self._uq_n_jobs = self._lbl_entry_ref(
-            tab, "Bootstrap Parallel Jobs:", "1", 2)
-        ctk.CTkLabel(tab, text="(1 = off, -1 = all cores)",
+            sf, "Bootstrap Parallel Jobs:", "1", 2)
+        ctk.CTkLabel(sf, text="(1 = off, -1 = all cores)",
                      anchor="w").grid(row=3, column=1, padx=4, sticky="w")
-        self._uq_confidence  = self._lbl_entry(tab, "Confidence Interval (%):", "95",   4)
+        self._uq_confidence  = self._lbl_entry(sf, "Confidence Interval (%):", "95",   4)
         self._uq_calib_frac_lbl, self._uq_calib_frac = self._lbl_entry_ref(
-            tab, "Calibration Fraction:", "0.05", 5)
-        self._uq_subsample   = self._lbl_entry(tab, "Subsample Test Size:",     "50",   6)
+            sf, "Calibration Fraction:", "0.05", 5)
+        self._uq_subsample   = self._lbl_entry(sf, "Subsample Test Size:",     "50",   6)
         self._uq_calibration_var = self._lbl_check(
-            tab, "Show Calibration Reporting", True, 7)
+            sf, "Show Calibration Reporting", True, 7)
         self._refresh_uq_state()
 
     def _refresh_uq_state(self, *_):
+        if not hasattr(self, "_uq_bootstrap_var"):
+            return
         bs_on   = self._uq_bootstrap_var.get()
         conf_on = self._uq_conformal_var.get()
         for w in (self._uq_n_bootstrap, self._uq_n_jobs):
@@ -1636,65 +1860,67 @@ class PhoenixApp(ctk.CTk):
 
     def _setup_interpretability_tab(self):
         tab = self.tabview.tab("Interpretability")
-        tab.columnconfigure(1, weight=1)
+        sf = ctk.CTkScrollableFrame(tab)
+        sf.pack(fill="both", expand=True, padx=4, pady=4)
+        sf.columnconfigure(1, weight=1)
         row = 0
 
         # ── Shared settings ───────────────────────────────────────────────────
         # Every selected model is profiled now (see Home tab's Interpretability
         # Before/After HPO steps) — no single "preferred" model to choose here any more.
-        self._interp_test_size = self._lbl_entry(tab, "Test Sample Size:",       "1000", row); row += 1
-        self._interp_bg_size   = self._lbl_entry(tab, "Background Sample Size:", "10",   row); row += 1
+        self._interp_test_size = self._lbl_entry(sf, "Test Sample Size:",       "1000", row); row += 1
+        self._interp_bg_size   = self._lbl_entry(sf, "Background Sample Size:", "10",   row); row += 1
 
         # ── ICE / PDP ─────────────────────────────────────────────────────────
-        ctk.CTkLabel(tab, text="Individual Conditional Expectation and Partial Dependence Plots (ICE and PDP)",
+        ctk.CTkLabel(sf, text="Individual Conditional Expectation and Partial Dependence Plots (ICE and PDP)",
                      font=ctk.CTkFont(size=12, weight="bold"),
                      anchor="w").grid(row=row, column=0, columnspan=2,
                                       padx=10, pady=(12, 2), sticky="w"); row += 1
-        self._interp_ice_pdp_var = self._lbl_check(tab, "Show ICE and PDP Plots", True, row); row += 1
+        self._interp_ice_pdp_var = self._lbl_check(sf, "Show ICE and PDP Plots", True, row); row += 1
         self._interp_ice_pdp_var.trace_add("write", self._refresh_interpretability_state)
         self._interp_subsample_lbl, self._interp_subsample = self._lbl_entry_ref(
-            tab, "Subsample:", "250", row); row += 1
+            sf, "Subsample:", "250", row); row += 1
         self._interp_grid_res_lbl, self._interp_grid_res = self._lbl_entry_ref(
-            tab, "Grid Resolution:", "10", row); row += 1
+            sf, "Grid Resolution:", "10", row); row += 1
 
         # ── ALE ───────────────────────────────────────────────────────────────
-        ctk.CTkLabel(tab, text="Accumulated Local Effects (ALE)", font=ctk.CTkFont(size=12, weight="bold"),
+        ctk.CTkLabel(sf, text="Accumulated Local Effects (ALE)", font=ctk.CTkFont(size=12, weight="bold"),
                      anchor="w").grid(row=row, column=0, columnspan=2,
                                       padx=10, pady=(12, 2), sticky="w"); row += 1
         self._interp_ale_var = self._lbl_check(
-            tab, "Show ALE Plots",
+            sf, "Show ALE Plots",
             True, row); row += 1
         self._interp_ale_var.trace_add("write", self._refresh_interpretability_state)
 
         # ── SHAP ──────────────────────────────────────────────────────────────
-        ctk.CTkLabel(tab, text="Shapley Additive Explanations (SHAP)", font=ctk.CTkFont(size=12, weight="bold"),
+        ctk.CTkLabel(sf, text="Shapley Additive Explanations (SHAP)", font=ctk.CTkFont(size=12, weight="bold"),
                      anchor="w").grid(row=row, column=0, columnspan=2,
                                       padx=10, pady=(12, 2), sticky="w"); row += 1
-        self._interp_shap_summary_var  = self._lbl_check(tab, "Show SHAP Summary",           True, row); row += 1
-        self._interp_shap_dep_var      = self._lbl_check(tab, "Show SHAP Dependence Plots",  True, row); row += 1
-        self._interp_shap_wf_var       = self._lbl_check(tab, "Show SHAP Waterfall Plots",   True, row); row += 1
+        self._interp_shap_summary_var  = self._lbl_check(sf, "Show SHAP Summary",           True, row); row += 1
+        self._interp_shap_dep_var      = self._lbl_check(sf, "Show SHAP Dependence Plots",  True, row); row += 1
+        self._interp_shap_wf_var       = self._lbl_check(sf, "Show SHAP Waterfall Plots",   True, row); row += 1
         self._interp_shap_wf_var.trace_add("write", self._refresh_interpretability_state)
 
         # Waterfall samples count
-        self._interp_wf_samples_lbl = ctk.CTkLabel(tab, text="Waterfall Samples:", anchor="w", width=240)
+        self._interp_wf_samples_lbl = ctk.CTkLabel(sf, text="Waterfall Samples:", anchor="w", width=240)
         self._interp_wf_samples_lbl.grid(row=row, column=0, padx=10, pady=4, sticky="w")
         self._interp_wf_n_var = tk.StringVar(value="3")
-        self._interp_wf_samples = ctk.CTkEntry(tab, width=60, textvariable=self._interp_wf_n_var)
+        self._interp_wf_samples = ctk.CTkEntry(sf, width=60, textvariable=self._interp_wf_n_var)
         self._interp_wf_samples.grid(row=row, column=1, padx=10, pady=4, sticky="w")
-        self._interp_wf_n_err_lbl = ctk.CTkLabel(tab, text="", text_color="#CC0000",
+        self._interp_wf_n_err_lbl = ctk.CTkLabel(sf, text="", text_color="#CC0000",
                                                    font=ctk.CTkFont(size=11), anchor="w")
         self._interp_wf_n_err_lbl.grid(row=row, column=2, padx=(0, 10), pady=4, sticky="w")
         self._interp_wf_n_var.trace_add("write", self._on_waterfall_n_changed)
         row += 1
 
         # Percentile slider bank — one vertical slider per waterfall sample
-        pct_header = ctk.CTkLabel(tab, text="Percentile positions  (100% = worst error, 0% = best error)",
+        pct_header = ctk.CTkLabel(sf, text="Percentile positions  (100% = worst error, 0% = best error)",
                                   anchor="w", font=ctk.CTkFont(size=11))
         pct_header.grid(row=row, column=0, columnspan=2, padx=10, pady=(4, 0), sticky="w")
         self._interp_wf_pct_header = pct_header
         row += 1
 
-        self._interp_wf_pct_frame = ctk.CTkFrame(tab)
+        self._interp_wf_pct_frame = ctk.CTkFrame(sf)
         self._interp_wf_pct_frame.grid(row=row, column=0, columnspan=2, padx=10, pady=(2, 6), sticky="ew")
         self._waterfall_pct_vars: list[tk.StringVar] = []
         self._waterfall_pct_sliders: list[ctk.CTkSlider] = []
@@ -1703,27 +1929,27 @@ class PhoenixApp(ctk.CTk):
         row += 1
 
         # ── Global Sensitivity Analysis ──────────────────────────────────────
-        ctk.CTkLabel(tab, text="Global Sensitivity Analysis (Morris / Sobol / FAST)",
+        ctk.CTkLabel(sf, text="Global Sensitivity Analysis (Morris / Sobol / FAST)",
                      font=ctk.CTkFont(size=12, weight="bold"),
                      anchor="w").grid(row=row, column=0, columnspan=2,
                                       padx=10, pady=(12, 2), sticky="w"); row += 1
         self._interp_sens_morris_var = self._lbl_check(
-            tab, "Show Morris Screening", True, row); row += 1
+            sf, "Show Morris Screening", True, row); row += 1
         self._interp_sens_morris_traj_lbl, self._interp_sens_morris_traj = self._lbl_entry_ref(
-            tab, "Morris Trajectories:", "10", row); row += 1
+            sf, "Morris Trajectories:", "10", row); row += 1
         self._interp_sens_morris_levels_lbl, self._interp_sens_morris_levels = self._lbl_entry_ref(
-            tab, "Morris Levels:", "4", row); row += 1
+            sf, "Morris Levels:", "4", row); row += 1
         self._interp_sens_sobol_var = self._lbl_check(
-            tab, "Show Sobol Indices", False, row); row += 1
+            sf, "Show Sobol Indices", False, row); row += 1
 
         # Sobol base sample size as a linked pair: a plain number entry and a
         # power-of-two entry rendered exponent-style ("[N] or 2^[p]"). Editing either
         # updates the other; a non-power-of-two N shows its exponent rounded to at
         # most 3 decimal places. Both boxes accept non-negative integers only.
         self._interp_sens_sobol_n_lbl = ctk.CTkLabel(
-            tab, text="Sobol Base Sample Size:", anchor="w", width=240)
+            sf, text="Sobol Base Sample Size:", anchor="w", width=240)
         self._interp_sens_sobol_n_lbl.grid(row=row, column=0, padx=10, pady=3, sticky="w")
-        _sobol_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        _sobol_frame = ctk.CTkFrame(sf, fg_color="transparent")
         _sobol_frame.grid(row=row, column=1, padx=4, pady=3, sticky="w")
         self._interp_sens_sobol_n = ctk.CTkEntry(_sobol_frame, width=80)
         self._interp_sens_sobol_n.insert(0, "512")
@@ -1774,9 +2000,13 @@ class PhoenixApp(ctk.CTk):
         # as one side-by-side agreement plot), unlike Morris which is a
         # different kind of method (screening).
         self._interp_sens_fast_var = self._lbl_check(
-            tab, "Show FAST Indices (Fourier Amplitude Sensitivity Testing)", False, row); row += 1
+            sf, "Show FAST Indices (Fourier Amplitude Sensitivity Testing)", False, row); row += 1
         self._interp_sens_fast_n_lbl, self._interp_sens_fast_n = self._lbl_entry_ref(
-            tab, "FAST Samples per Feature:", "512", row); row += 1
+            sf, "FAST Samples per Feature:", "512", row); row += 1
+        self._interp_sens_fast_n_hint = ctk.CTkLabel(
+            sf, text="Must be at least 65 (SALib requires N > 4*M^2, M=4)",
+            font=ctk.CTkFont(size=11), anchor="w")
+        self._interp_sens_fast_n_hint.grid(row=row, column=1, padx=10, pady=(0, 4), sticky="w"); row += 1
 
         self._interp_sens_morris_var.trace_add("write", self._refresh_interpretability_state)
         self._interp_sens_sobol_var.trace_add("write", self._refresh_interpretability_state)
@@ -1785,6 +2015,15 @@ class PhoenixApp(ctk.CTk):
         self._refresh_interpretability_state()
 
     def _refresh_interpretability_state(self, *_):
+        # Unlike its siblings (_refresh_gp_posterior_state etc.), this used to be only
+        # ever called after the Interpretability tab itself had already built
+        # _interp_ice_pdp_var (its own trace_add callbacks, and the explicit call at
+        # the end of _setup_interpretability_tab) -- now also called from
+        # _refresh_buttons(), which _setup_home_tab() (built BEFORE the
+        # Interpretability tab, see _build_ui's tab order) calls at its own end, so
+        # this guard is now load-bearing, not defensive-for-its-own-sake.
+        if not hasattr(self, "_interp_ice_pdp_var"):
+            return
         ice_on = self._interp_ice_pdp_var.get()
         ale_on = self._interp_ale_var.get()
         wf_on  = self._interp_shap_wf_var.get()
@@ -1819,8 +2058,9 @@ class PhoenixApp(ctk.CTk):
             self._interp_sens_sobol_or_lbl.configure(text_color=dim)
             fast_on = self._interp_sens_fast_var.get()
             self._interp_sens_fast_n.configure(state="normal" if fast_on else "disabled")
-            self._interp_sens_fast_n_lbl.configure(
-                text_color=("gray20" if fast_on else "gray60"))
+            fast_dim = "gray20" if fast_on else "gray60"
+            self._interp_sens_fast_n_lbl.configure(text_color=fast_dim)
+            self._interp_sens_fast_n_hint.configure(text_color=fast_dim)
 
     def _rebuild_waterfall_percentile_sliders(self, n: int) -> None:
         for w in self._interp_wf_pct_frame.winfo_children():
@@ -2023,40 +2263,42 @@ class PhoenixApp(ctk.CTk):
 
     def _setup_cv_tab(self):
         tab = self.tabview.tab("Postprocessing")
-        tab.columnconfigure(1, weight=1)
+        sf = ctk.CTkScrollableFrame(tab)
+        sf.pack(fill="both", expand=True, padx=4, pady=4)
+        sf.columnconfigure(1, weight=1)
 
         # ── Cross-Validation ──
-        ctk.CTkLabel(tab, text="Cross-Validation",
+        ctk.CTkLabel(sf, text="Cross-Validation",
                      font=ctk.CTkFont(weight="bold")).grid(
             row=0, column=0, padx=10, pady=(8, 2), sticky="w", columnspan=2)
 
         # Method dropdown — inline so we can pass command=
-        ctk.CTkLabel(tab, text="Cross-Validation Method:", anchor="w", width=240).grid(
+        ctk.CTkLabel(sf, text="Cross-Validation Method:", anchor="w", width=240).grid(
             row=1, column=0, padx=10, pady=4, sticky="w")
-        self._cv_method = ctk.CTkOptionMenu(tab, values=_CV_METHOD_DISPLAY, width=200,
+        self._cv_method = ctk.CTkOptionMenu(sf, values=_CV_METHOD_DISPLAY, width=200,
                                             command=self._on_cv_method_change)
         self._cv_method.set(_CV_METHOD_DISPLAY[0])
         self._cv_method.grid(row=1, column=1, padx=10, pady=4, sticky="w")
 
         # Dynamic parameter rows — use _lbl_entry_ref so we can show/hide the label too
-        self._cv_n_splits_lbl,  self._cv_n_splits  = self._lbl_entry_ref(tab, "Number of Splits:", "10",  2)
-        self._cv_test_size_lbl, self._cv_test_size  = self._lbl_entry_ref(tab, "Test Size:",        "0.2", 3)
+        self._cv_n_splits_lbl,  self._cv_n_splits  = self._lbl_entry_ref(sf, "Number of Splits:", "10",  2)
+        self._cv_test_size_lbl, self._cv_test_size  = self._lbl_entry_ref(sf, "Test Size:",        "0.2", 3)
         # Random State isn't user-facing here any more — it's always overridden downstream
         # by the single Random Seed field on the Home tab. Widget kept (never shown) so
         # the existing sync/field-visibility code below doesn't need restructuring.
-        self._cv_rand_state_lbl,self._cv_rand_state = self._lbl_entry_ref(tab, "Random State:",     "0",   4)
+        self._cv_rand_state_lbl,self._cv_rand_state = self._lbl_entry_ref(sf, "Random State:",     "0",   4)
         self._cv_rand_state_lbl.grid_remove()
         self._cv_rand_state.grid_remove()
-        self._cv_n_repeats_lbl, self._cv_n_repeats  = self._lbl_entry_ref(tab, "Number of Repeats:","5",   5)
-        self._cv_p_lbl,         self._cv_p          = self._lbl_entry_ref(tab, "p (leave-p-out):",  "2",   6)
+        self._cv_n_repeats_lbl, self._cv_n_repeats  = self._lbl_entry_ref(sf, "Number of Repeats:","5",   5)
+        self._cv_p_lbl,         self._cv_p          = self._lbl_entry_ref(sf, "p (leave-p-out):",  "2",   6)
 
         # Shown only for Leave One Out (which has no parameters)
-        self._cv_no_params_lbl = ctk.CTkLabel(tab,
+        self._cv_no_params_lbl = ctk.CTkLabel(sf,
             text="No parameters required for this method.", text_color="gray")
         self._cv_no_params_lbl.grid(row=2, column=0, columnspan=2, padx=10, pady=4, sticky="w")
 
         # Scoring metric (fixed below the dynamic rows)
-        ctk.CTkLabel(tab, text="Scoring Metric:",
+        ctk.CTkLabel(sf, text="Scoring Metric:",
                      font=ctk.CTkFont(weight="bold")).grid(
             row=8, column=0, padx=10, pady=(10, 2), sticky="w", columnspan=2)
 
@@ -2068,31 +2310,32 @@ class PhoenixApp(ctk.CTk):
             ("Mean Absolute Percentage Error (MAPE)",      "MAPE"),
             ("R²",                                         "R^2"),
             ("Adjusted R²",                                "ADJUSTED R^2"),
+            ("Predicted R² (PRESS)",                        "PRED_R^2"),
             ("Nash-Sutcliffe Efficiency (Q²/NSE)",         "Q^2"),
             ("Kling-Gupta Efficiency (KGE)",               "KGE"),
             ("Explained Variance",                         "Explained Variance"),
         ]
         for i, (text, val) in enumerate(_cv_metrics):
-            ctk.CTkRadioButton(tab, text=text,
+            ctk.CTkRadioButton(sf, text=text,
                                variable=self._cv_metric_var, value=val).grid(
                 row=9 + i, column=0, padx=20, pady=2, sticky="w")
 
         # ── Postprocessing Sections ──
-        ctk.CTkLabel(tab, text="Postprocessing Sections",
+        ctk.CTkLabel(sf, text="Postprocessing Sections",
                      font=ctk.CTkFont(weight="bold")).grid(
-            row=18, column=0, padx=10, pady=(14, 2), sticky="w", columnspan=2)
+            row=19, column=0, padx=10, pady=(14, 2), sticky="w", columnspan=2)
 
-        self._cv_show_cv_summary  = self._lbl_check(tab, "Show Cross-Validation Summary",             True, 19)
-        self._cv_show_influential = self._lbl_check(tab, "Show Influential Points Analysis",           True, 20)
-        self._cv_show_stat_tests  = self._lbl_check(tab, "Show Residual Statistical Tests",            True, 21)
-        self._cv_show_residuals   = self._lbl_check(tab, "Show Residuals with Influential Points",     True, 22)
+        self._cv_show_cv_summary  = self._lbl_check(sf, "Show Cross-Validation Summary",             True, 20)
+        self._cv_show_influential = self._lbl_check(sf, "Show Influential Points Analysis",           True, 21)
+        self._cv_show_stat_tests  = self._lbl_check(sf, "Show Residual Statistical Tests",            True, 22)
+        self._cv_show_residuals   = self._lbl_check(sf, "Show Residuals with Influential Points",     True, 23)
 
-        self._cv_show_transforms  = self._lbl_check(tab, "Show Residual Transformations",              True, 23)
+        self._cv_show_transforms  = self._lbl_check(sf, "Show Residual Transformations",              True, 24)
         self._cv_show_transforms.trace_add("write", self._refresh_cv_state)
 
         # Which transforms to try — inline/"tabbed" and indented under the checkbox above.
-        transforms_sub = ctk.CTkFrame(tab, fg_color="transparent")
-        transforms_sub.grid(row=24, column=0, columnspan=2, padx=(40, 10), pady=(0, 4), sticky="w")
+        transforms_sub = ctk.CTkFrame(sf, fg_color="transparent")
+        transforms_sub.grid(row=25, column=0, columnspan=2, padx=(40, 10), pady=(0, 4), sticky="w")
         self._cv_transform_vars: dict[str, tk.BooleanVar] = {}
         self._cv_transform_cbs: list[ctk.CTkCheckBox] = []
         for name in ["Yeo-Johnson", "Arcsinh"]:
@@ -2102,9 +2345,9 @@ class PhoenixApp(ctk.CTk):
             cb.pack(side="left", padx=(0, 14))
             self._cv_transform_cbs.append(cb)
 
-        self._cv_show_perm_imp = self._lbl_check(tab, "Show Permutation Feature Importance", True, 25)
+        self._cv_show_perm_imp = self._lbl_check(sf, "Show Permutation Feature Importance", True, 26)
         self._cv_show_lofo = self._lbl_check(
-            tab, "Show Leave-One-Feature-Out (LOFO) Importance", False, 26)
+            sf, "Show Leave-One-Feature-Out (LOFO) Importance", False, 27)
 
         # ── Normality Test Metrics ──
         # Which tests the report's Best Transformation Normality Metrics table shows.
@@ -2115,9 +2358,9 @@ class PhoenixApp(ctk.CTk):
         # independent of which individual tests are ticked -- unchecking every test
         # below means "show zero columns", not "hide the table" (that's this one).
         self._cv_show_normality_metrics = self._lbl_check(
-            tab, "Show Best Transformation Normality Metrics", True, 27)
-        norm_sub = ctk.CTkFrame(tab, fg_color="transparent")
-        norm_sub.grid(row=28, column=0, columnspan=2, padx=(40, 10), pady=(0, 4), sticky="w")
+            sf, "Show Best Transformation Normality Metrics", True, 28)
+        norm_sub = ctk.CTkFrame(sf, fg_color="transparent")
+        norm_sub.grid(row=29, column=0, columnspan=2, padx=(40, 10), pady=(0, 4), sticky="w")
         self._cv_normality_vars: dict[str, tk.BooleanVar] = {}
         for name, default in [("Shapiro-Wilk", True), ("Lilliefors", True),
                               ("Filiben", True), ("Jarque-Bera", False),
@@ -2126,23 +2369,24 @@ class PhoenixApp(ctk.CTk):
             self._cv_normality_vars[name] = var
             ctk.CTkCheckBox(norm_sub, text=name, variable=var).pack(side="left", padx=(0, 14))
         ctk.CTkLabel(
-            tab, text="Anderson-Darling and Shapiro-Wilk are always computed and shown (they "
+            sf, text="Anderson-Darling and Shapiro-Wilk are always computed and shown (they "
                       "select the best transformation). All tests are always included in the "
                       "Excel results file.",
             font=ctk.CTkFont(size=11), anchor="w", text_color=_LBL_NORMAL,
-        ).grid(row=29, column=0, columnspan=2, padx=10, pady=(0, 4), sticky="w")
+        ).grid(row=30, column=0, columnspan=2, padx=10, pady=(0, 4), sticky="w")
 
         # ── Model Deployment ──
         # Which artifact files the report step writes to the Models folder. With all
-        # four off, no Models folder is created and the report's Saved Models and
+        # five off, no Models folder is created and the report's Saved Models and
         # Artifacts section is omitted.
-        ctk.CTkLabel(tab, text="Model Deployment",
+        ctk.CTkLabel(sf, text="Model Deployment",
                      font=ctk.CTkFont(weight="bold")).grid(
-            row=30, column=0, padx=10, pady=(14, 2), sticky="w", columnspan=2)
-        self._deploy_pipelines = self._lbl_check(tab, "Save Per-Target Pipelines (.pkl)",   True, 31)
-        self._deploy_metadata  = self._lbl_check(tab, "Save Reproducibility Metadata (.json)", True, 32)
-        self._deploy_bundle    = self._lbl_check(tab, "Save Combined Bundle (.pkl)",        True, 33)
-        self._deploy_predictor = self._lbl_check(tab, "Save Deployable Predictor (.pkl)",   True, 34)
+            row=31, column=0, padx=10, pady=(14, 2), sticky="w", columnspan=2)
+        self._deploy_pipelines = self._lbl_check(sf, "Save Per-Target Pipelines (.pkl)",   True, 32)
+        self._deploy_metadata  = self._lbl_check(sf, "Save Reproducibility Metadata (.json)", True, 33)
+        self._deploy_bundle    = self._lbl_check(sf, "Save Combined Bundle (.pkl)",        True, 34)
+        self._deploy_predictor = self._lbl_check(sf, "Save Deployable Predictor (.pkl)",   True, 35)
+        self._deploy_model_cards = self._lbl_check(sf, "Save Model Cards (.pdf)",          True, 36)
 
         self._refresh_cv_state()
 
@@ -2538,6 +2782,8 @@ class PhoenixApp(ctk.CTk):
     # ── HPO grey-out ──────────────────────────────────────────────────────────
 
     def _refresh_hpo_state(self):
+        if not hasattr(self, "_hpo_use_random"):
+            return
         groups = [
             (self._hpo_use_random,
              [self._hpo_n_iter_lbl, self._hpo_n_iter, self._hpo_sampling] + self._hpo_random_es_widgets),
@@ -2560,7 +2806,12 @@ class PhoenixApp(ctk.CTk):
 
     # ── Session sync ──────────────────────────────────────────────────────────
 
-    def _sync_session(self) -> bool:
+    def _sync_session(self, forced_step: str | None = None) -> bool:
+        """forced_step: when set (by _run_single_step, which can run a step via its
+        own Run button regardless of that row's Enable checkbox), the settings
+        block for that specific step is validated even if its checkbox is off --
+        otherwise a step run this way would silently execute against stale/unset
+        settings instead of what's currently on screen."""
         s = self.session
         s.dataset_path    = self.dataset_entry.get().strip()
         s.output_dir      = self.output_entry.get().strip()
@@ -2568,6 +2819,11 @@ class PhoenixApp(ctk.CTk):
         s.selected_models = [n for n, v in self._model_vars.items() if v.get()]
         s.report_metric_cols = [k for k, v in self._report_metric_vars.items() if v.get()]
         s.monotonic_constraints = dict(self._monotonic_constraints)
+        # Always synced (unlike the HPO settings block below, gated on the step
+        # actually running) -- run_step_uq_before/interpretability_before need to know
+        # whether HPO is enabled regardless of whether HPO itself is what's being run
+        # right now, to label their own "before" stage correctly.
+        s.hpo_enabled = self._step_enable_vars["hpo"].get()
 
         if not s.dataset_path:
             messagebox.showerror("Missing Input", "Please specify a dataset path."); return False
@@ -2585,7 +2841,7 @@ class PhoenixApp(ctk.CTk):
             messagebox.showerror("Invalid Input", "Test Size must be a decimal number."); return False
         if not (0 < s.test_size < 1):
             messagebox.showerror("Invalid Input", "Test Size must be between 0 and 1 (e.g. 0.2 for 20%)."); return False
-        s.split_method              = self._preproc_split.get()   # "First"/"Last"/"Random"; code uses .lower()
+        s.split_method              = self._preproc_split.get()   # "First"/"Last"/"Random"/"Stratified"/"Systematic"; code uses .lower()
         s.scaler_type               = self._preproc_scaler.get()
         s.show_target_vs_target     = self._preproc_target_vs_target.get()
         s.show_features_vs_targets  = self._preproc_feat_vs_target.get()
@@ -2611,136 +2867,153 @@ class PhoenixApp(ctk.CTk):
             messagebox.showerror("Invalid Input", "Random Seed must be an integer."); return False
         s.report_source = "ui"
 
-        # Uncertainty Quantification
-        bs_on   = self._uq_bootstrap_var.get()
-        conf_on = self._uq_conformal_var.get()
-        if not bs_on and not conf_on:
-            messagebox.showerror("Invalid Input", "Please select at least one UQ method."); return False
-        if bs_on and conf_on:
-            uq_method_str = "Both"
-        elif bs_on:
-            uq_method_str = "Bootstrapping"
-        else:
-            uq_method_str = "Conformal"
-        try:
-            s.uq_settings = dict(
-                uq_method=uq_method_str,
-                n_bootstrap=int(self._uq_n_bootstrap.get()),
-                confidence_interval=float(self._uq_confidence.get()),
-                calibration_frac=float(self._uq_calib_frac.get()),
-                subsample_test_size=int(self._uq_subsample.get()),
-                n_jobs=int(self._uq_n_jobs.get()),
-                include_gp_posterior=self._uq_gp_posterior_var.get(),
-                calibration_enabled=self._uq_calibration_var.get(),
-            )
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Uncertainty Quantification fields must be numeric."); return False
-        if s.uq_settings["n_bootstrap"] < 2:
-            messagebox.showerror("Invalid Input", "Number of Bootstraps must be at least 2."); return False
-        if not (0 < s.uq_settings["confidence_interval"] < 100):
-            messagebox.showerror("Invalid Input", "Confidence Interval must be between 0 and 100 (e.g. 95)."); return False
-        if not (0 < s.uq_settings["calibration_frac"] < 1):
-            messagebox.showerror("Invalid Input", "Calibration Fraction must be between 0 and 1 (e.g. 0.05)."); return False
-        if s.uq_settings["subsample_test_size"] < 1:
-            messagebox.showerror("Invalid Input", "Subsample Test Size must be at least 1."); return False
+        # Uncertainty Quantification — validated only if a UQ step is actually
+        # enabled to run this invocation. Otherwise these settings are never
+        # consumed, so a stale/invalid value here would be a misleading block on
+        # an unrelated run (e.g. Interpretability-only) rather than a real problem.
+        if forced_step in ("uq_before", "uq_after") \
+                or self._step_enable_vars["uq_before"].get() or self._step_enable_vars["uq_after"].get():
+            bs_on   = self._uq_bootstrap_var.get()
+            conf_on = self._uq_conformal_var.get()
+            if not bs_on and not conf_on:
+                messagebox.showerror("Invalid Input", "Please select at least one UQ method."); return False
+            if bs_on and conf_on:
+                uq_method_str = "Both"
+            elif bs_on:
+                uq_method_str = "Bootstrapping"
+            else:
+                uq_method_str = "Conformal"
+            try:
+                s.uq_settings = dict(
+                    uq_method=uq_method_str,
+                    n_bootstrap=int(self._uq_n_bootstrap.get()),
+                    confidence_interval=float(self._uq_confidence.get()),
+                    calibration_frac=float(self._uq_calib_frac.get()),
+                    subsample_test_size=int(self._uq_subsample.get()),
+                    n_jobs=int(self._uq_n_jobs.get()),
+                    include_gp_posterior=self._uq_gp_posterior_var.get(),
+                    calibration_enabled=self._uq_calibration_var.get(),
+                )
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Uncertainty Quantification fields must be numeric."); return False
+            if s.uq_settings["n_bootstrap"] < 2:
+                messagebox.showerror("Invalid Input", "Bootstrap Samples must be at least 2."); return False
+            if not (0 < s.uq_settings["confidence_interval"] < 100):
+                messagebox.showerror("Invalid Input", "Confidence Interval must be between 0 and 100 (e.g. 95)."); return False
+            if not (0 < s.uq_settings["calibration_frac"] < 1):
+                messagebox.showerror("Invalid Input", "Calibration Fraction must be between 0 and 1 (e.g. 0.05)."); return False
+            if s.uq_settings["subsample_test_size"] < 1:
+                messagebox.showerror("Invalid Input", "Subsample Test Size must be at least 1."); return False
 
-        # Interpretability
-        try:
-            s.interpretability_settings = dict(
-                test_sample_size=int(self._interp_test_size.get()),
-                background_sample_size=int(self._interp_bg_size.get()),
-                subsample=int(self._interp_subsample.get()),
-                grid_resolution=int(self._interp_grid_res.get()),
-                show_ice_pdp=self._interp_ice_pdp_var.get(),
-                show_ale=self._interp_ale_var.get(),
-                show_shap_summary=self._interp_shap_summary_var.get(),
-                show_shap_dependence=self._interp_shap_dep_var.get(),
-                show_shap_waterfall=self._interp_shap_wf_var.get(),
-                n_waterfall_samples=len(self._waterfall_pct_vars),
-                waterfall_percentiles=[int(v.get()) / 100.0 for v in self._waterfall_pct_vars],
-                show_sensitivity_morris=self._interp_sens_morris_var.get(),
-                show_sensitivity_sobol=self._interp_sens_sobol_var.get(),
-                show_sensitivity_fast=self._interp_sens_fast_var.get(),
-                sensitivity_morris_trajectories=int(self._interp_sens_morris_traj.get()),
-                sensitivity_morris_levels=int(self._interp_sens_morris_levels.get()),
-                sensitivity_sobol_n=int(self._interp_sens_sobol_n.get()),
-                sensitivity_fast_n=int(self._interp_sens_fast_n.get()),
-            )
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Interpretability fields must be numeric."); return False
-        if s.interpretability_settings["sensitivity_sobol_n"] < 1:
-            messagebox.showerror("Invalid Input",
-                                 "Sobol Base Sample Size must be a positive integer."); return False
-        # SALib's FAST hard-requires N > 4*M^2; this app always calls it with
-        # the library default M=4, so N must be at least 65 -- caught here so
-        # the run doesn't get partway through Interpretability before failing.
-        if s.interpretability_settings["show_sensitivity_fast"] \
-                and s.interpretability_settings["sensitivity_fast_n"] <= 64:
-            messagebox.showerror(
-                "Invalid Input",
-                "FAST Samples per Feature must be at least 65 (SALib requires "
-                "N > 4*M^2 with M=4). Increase the value or untick Show FAST Indices.")
-            return False
+        # Interpretability — validated only if an Interpretability step is
+        # actually enabled to run this invocation (same reasoning as UQ above).
+        if forced_step in ("interpretability_before", "interpretability_after") \
+                or self._step_enable_vars["interpretability_before"].get() \
+                or self._step_enable_vars["interpretability_after"].get():
+            try:
+                s.interpretability_settings = dict(
+                    test_sample_size=int(self._interp_test_size.get()),
+                    background_sample_size=int(self._interp_bg_size.get()),
+                    subsample=int(self._interp_subsample.get()),
+                    grid_resolution=int(self._interp_grid_res.get()),
+                    show_ice_pdp=self._interp_ice_pdp_var.get(),
+                    show_ale=self._interp_ale_var.get(),
+                    show_shap_summary=self._interp_shap_summary_var.get(),
+                    show_shap_dependence=self._interp_shap_dep_var.get(),
+                    show_shap_waterfall=self._interp_shap_wf_var.get(),
+                    n_waterfall_samples=len(self._waterfall_pct_vars),
+                    waterfall_percentiles=[int(v.get()) / 100.0 for v in self._waterfall_pct_vars],
+                    show_sensitivity_morris=self._interp_sens_morris_var.get(),
+                    show_sensitivity_sobol=self._interp_sens_sobol_var.get(),
+                    show_sensitivity_fast=self._interp_sens_fast_var.get(),
+                    sensitivity_morris_trajectories=int(self._interp_sens_morris_traj.get()),
+                    sensitivity_morris_levels=int(self._interp_sens_morris_levels.get()),
+                    sensitivity_sobol_n=int(self._interp_sens_sobol_n.get()),
+                    sensitivity_fast_n=int(self._interp_sens_fast_n.get()),
+                )
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Interpretability fields must be numeric."); return False
+            if s.interpretability_settings["sensitivity_sobol_n"] < 1:
+                messagebox.showerror("Invalid Input",
+                                     "Sobol Base Sample Size must be a positive integer."); return False
+            # SALib's FAST hard-requires N > 4*M^2; this app always calls it with
+            # the library default M=4, so N must be at least 65 -- caught here so
+            # the run doesn't get partway through Interpretability before failing.
+            if s.interpretability_settings["show_sensitivity_fast"] \
+                    and s.interpretability_settings["sensitivity_fast_n"] <= 64:
+                messagebox.showerror(
+                    "Invalid Input",
+                    "FAST Samples per Feature must be at least 65 (SALib requires "
+                    "N > 4*M^2 with M=4). Increase the value or untick Show FAST Indices.")
+                return False
 
-        # Hyperparameter Optimisation methods
-        methods = []
-        if self._hpo_use_random.get():   methods.append("random")
-        if self._hpo_use_hyperopt.get(): methods.append("hyperopt")
-        if self._hpo_use_skopt.get():    methods.append("skopt")
-        if not methods:
-            messagebox.showerror("Invalid Input", "Please select at least one HPO method."); return False
-        s.methods_to_run  = methods
-        s.hpo_metric      = self._hpo_metric_var.get()
-        s.sampling_method = _SAMPLING_METHOD_MAP[self._hpo_sampling.get()]
-        try:
-            s.n_iter       = int(self._hpo_n_iter.get())
-            s.sample_size  = int(self._hpo_sample_size.get())
-            s.evals        = int(self._hpo_evals.get())
-            s.calls        = int(self._hpo_calls.get())
-            s.n_jobs       = int(self._hpo_n_jobs.get())
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Hyperparameter Optimisation numeric fields must be integers."); return False
-        # skopt's gp_minimize hard-requires n_calls >= 10 (it raises otherwise) -
-        # caught here so the run doesn't get partway through HPO before failing.
-        if "skopt" in methods and s.calls < 10:
-            messagebox.showerror(
-                "Invalid Input",
-                "Scikit-Optimize Calls must be at least 10 (gp_minimize requires "
-                "n_calls >= 10). Increase the value or untick Scikit-Optimize.")
-            return False
+        # Hyperparameter Optimisation methods — validated only if the HPO step
+        # is actually enabled to run this invocation (same reasoning as UQ
+        # above). UQ-After/Interpretability-After need hpo_results to already
+        # exist, but they read it from a prior run rather than triggering HPO
+        # themselves, so they don't need these settings valid right now.
+        if forced_step == "hpo" or self._step_enable_vars["hpo"].get():
+            methods = []
+            if self._hpo_use_random.get():   methods.append("random")
+            if self._hpo_use_hyperopt.get(): methods.append("hyperopt")
+            if self._hpo_use_skopt.get():    methods.append("skopt")
+            if not methods:
+                messagebox.showerror("Invalid Input", "Please select at least one HPO method."); return False
+            s.methods_to_run  = methods
+            s.hpo_metric      = self._hpo_metric_var.get()
+            s.sampling_method = _SAMPLING_METHOD_MAP[self._hpo_sampling.get()]
+            try:
+                s.n_iter       = int(self._hpo_n_iter.get())
+                s.sample_size  = int(self._hpo_sample_size.get())
+                s.evals        = int(self._hpo_evals.get())
+                s.calls        = int(self._hpo_calls.get())
+                s.n_jobs       = int(self._hpo_n_jobs.get())
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Hyperparameter Optimisation numeric fields must be integers."); return False
+            # skopt's gp_minimize hard-requires n_calls >= 10 (it raises otherwise) -
+            # caught here so the run doesn't get partway through HPO before failing.
+            if "skopt" in methods and s.calls < 10:
+                messagebox.showerror(
+                    "Invalid Input",
+                    "Scikit-Optimize Calls must be at least 10 (gp_minimize requires "
+                    "n_calls >= 10). Increase the value or untick Scikit-Optimize.")
+                return False
 
-        # Early stopping
-        es: dict = {}
-        for method, (en_var, pat_e, md_e) in self._es_vars.items():
-            if en_var.get():
-                try:
-                    es[method] = {"patience": int(pat_e.get()), "min_delta": float(md_e.get())}
-                except ValueError:
-                    messagebox.showerror("Invalid Input",
-                                         f"Early stopping fields for {method} must be numeric."); return False
-        s.early_stopping = es if es else None
+            # Early stopping
+            es: dict = {}
+            for method, (en_var, pat_e, md_e) in self._es_vars.items():
+                if en_var.get():
+                    try:
+                        es[method] = {"patience": int(pat_e.get()), "min_delta": float(md_e.get())}
+                    except ValueError:
+                        messagebox.showerror("Invalid Input",
+                                             f"Early stopping fields for {method} must be numeric."); return False
+            s.early_stopping = es if es else None
 
-        # Cross-Validation — collect only the fields relevant to the chosen method
-        _method_display = self._cv_method.get()
-        _visible = _CV_FIELDS.get(_method_display, ())
-        try:
-            cv_args: dict = {}
-            if "n_splits"    in _visible: cv_args["n_splits"]    = int(self._cv_n_splits.get())
-            if "test_size"   in _visible:
-                cv_test_size = float(self._cv_test_size.get())
-                if not (0 < cv_test_size < 1):
-                    messagebox.showerror("Invalid Input",
-                        "Cross-Validation Test Size must be between 0 and 1 (e.g. 0.2 for 20%).")
-                    return False
-                cv_args["test_size"] = cv_test_size
-            if "random_state"in _visible: cv_args["random_state"]= int(self._cv_rand_state.get())
-            if "n_repeats"   in _visible: cv_args["n_repeats"]   = int(self._cv_n_repeats.get())
-            if "p"           in _visible: cv_args["p"]           = int(self._cv_p.get())
-            s.cv_args = cv_args
-        except ValueError:
-            messagebox.showerror("Invalid Input", "Cross-Validation fields must be numeric."); return False
-        s.cv_method      = _CV_METHOD_MAP[_method_display]
-        s.scoring_metric = self._cv_metric_var.get()
+        # Cross-Validation — collect only the fields relevant to the chosen
+        # method, and only validated if the CV step is actually enabled to run
+        # this invocation (same reasoning as UQ above).
+        if forced_step == "cv" or self._step_enable_vars["cv"].get():
+            _method_display = self._cv_method.get()
+            _visible = _CV_FIELDS.get(_method_display, ())
+            try:
+                cv_args: dict = {}
+                if "n_splits"    in _visible: cv_args["n_splits"]    = int(self._cv_n_splits.get())
+                if "test_size"   in _visible:
+                    cv_test_size = float(self._cv_test_size.get())
+                    if not (0 < cv_test_size < 1):
+                        messagebox.showerror("Invalid Input",
+                            "Cross-Validation Test Size must be between 0 and 1 (e.g. 0.2 for 20%).")
+                        return False
+                    cv_args["test_size"] = cv_test_size
+                if "random_state"in _visible: cv_args["random_state"]= int(self._cv_rand_state.get())
+                if "n_repeats"   in _visible: cv_args["n_repeats"]   = int(self._cv_n_repeats.get())
+                if "p"           in _visible: cv_args["p"]           = int(self._cv_p.get())
+                s.cv_args = cv_args
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Cross-Validation fields must be numeric."); return False
+            s.cv_method      = _CV_METHOD_MAP[_method_display]
+            s.scoring_metric = self._cv_metric_var.get()
 
         s.show_cv_summary            = self._cv_show_cv_summary.get()
         s.show_cooks_distance        = self._cv_show_influential.get()
@@ -2758,6 +3031,7 @@ class PhoenixApp(ctk.CTk):
         s.save_metadata       = self._deploy_metadata.get()
         s.save_bundle         = self._deploy_bundle.get()
         s.save_predictor_file = self._deploy_predictor.get()
+        s.save_model_cards    = self._deploy_model_cards.get()
 
         # PERL
         perl_path = self.perl_config_entry.get().strip()
@@ -2798,7 +3072,11 @@ class PhoenixApp(ctk.CTk):
 
     # ── Button state ──────────────────────────────────────────────────────────
 
-    def _refresh_buttons(self):
+    def _refresh_buttons(self, *_):
+        # *_: also registered directly as a tk variable trace callback (see the group
+        # master checkboxes and the HPO checkbox below), which calls back with
+        # (name, index, mode) -- accepted and ignored here, same as every other
+        # *_-suffixed handler in this file.
         busy = self._running_step is not None
         for key, _, prereqs in STEPS:
             prereqs_done = all(self.step_status.get(p) == "done" for p in prereqs)
@@ -2807,6 +3085,15 @@ class PhoenixApp(ctk.CTk):
             # Run" sequence could hit this check before the sync ran, leaving the
             # button disabled and swallowing that first click.
             extra_ok = (key != "perl") or bool(self.perl_config_entry.get().strip())
+            # A Before/After sub-step's own group master checkbox additionally gates
+            # its Run button -- switching a group off must grey out its sub-steps'
+            # Run buttons even when their prerequisite steps already show "done" from
+            # an earlier run (HPO's own on/off gate for "After" is already covered
+            # by the ordinary prereqs check above, since "hpo" is one of them).
+            group_id = _GROUP_FOR_STEP_KEY.get(key)
+            if group_id is not None:
+                extra_ok = extra_ok and getattr(self, "_group_master_vars", {}).get(
+                    group_id, tk.BooleanVar(value=True)).get()
             enabled = prereqs_done and extra_ok and not busy
             self._step_run_btns[key].configure(state="normal" if enabled else "disabled")
 
@@ -2823,6 +3110,30 @@ class PhoenixApp(ctk.CTk):
         self.reset_btn.configure(state="normal" if not busy else "disabled")
 
         self._set_settings_locked(busy)
+        # _set_settings_locked() above blanket-sets every settings widget in these tabs
+        # to state="normal" whenever nothing is running -- it has no way to know that
+        # several widgets have their own NARROWER reactive gating on top of that (e.g.
+        # "GP Posterior" only available when the Gaussian Process Regressor model is
+        # selected, several Interpretability fields only available when their own
+        # parent checkbox is on). Left alone, the blanket reset silently re-enables
+        # those the instant anything else triggers a button refresh -- which happens
+        # constantly during normal use (every step start/finish calls this) -- so a
+        # user who correctly saw a field grey out could find it editable again moments
+        # later with no action of their own. Re-applying these after the blanket reset,
+        # and only when not busy (busy must keep everything disabled regardless of
+        # these narrower rules), fixes it at the one place that causes it rather than
+        # each affected tab separately.
+        if not busy:
+            self._apply_step_group_overrides()
+            self._refresh_gp_posterior_state()
+            self._refresh_monotonic_button_state()
+            self._refresh_preproc_state()
+            self._refresh_interpretability_state()
+            self._refresh_cv_state()
+            self._refresh_hpo_state()
+            self._refresh_uq_state()
+            if hasattr(self, "_cv_method"):
+                self._on_cv_method_change(self._cv_method.get())
 
     # Widget types worth locking — anything a user could change a setting through.
     # ttk.Treeview (Dataset Cleaning's column manager/preview) has no simple "disabled"
@@ -2866,6 +3177,7 @@ class PhoenixApp(ctk.CTk):
         other_exclude = frozenset({
             getattr(self, "_clean_load_btn", None),
             getattr(self, "_clean_apply_btn", None),
+            getattr(self, "_clean_export_btn", None),
             getattr(self, "_phys_generate_btn", None),
         } - {None})
         for name in ["Dataset Cleaning", "Physics Modelling", "Home", "Models",
@@ -2913,7 +3225,7 @@ class PhoenixApp(ctk.CTk):
     # ── Step execution ────────────────────────────────────────────────────────
 
     def _run_single_step(self, key: str):
-        if not self._sync_session():
+        if not self._sync_session(forced_step=key):
             return
         prereqs = next(p for k, _, p in STEPS if k == key)
         stale = self._stale_prereqs(prereqs)
@@ -3174,8 +3486,20 @@ class PhoenixApp(ctk.CTk):
     def _generate_report(self):
         if not self._sync_session():
             return
+        # "Before HPO" is only accurate once HPO has actually produced results this
+        # session (not merely whether it was enabled -- e.g. Stopped mid-run leaves it
+        # disabled by this same fact-based test) -- matches run_step_report()'s own
+        # before_label, so the Time Breakdown table doesn't contradict the section
+        # headings built from that same variable.
+        hpo_ran = self.session.hpo_results is not None
+        _relabel = {
+            "uq_before": "Uncertainty Quantification (Before HPO)" if hpo_ran
+                        else "Uncertainty Quantification (Default Hyperparameters)",
+            "interpretability_before": "Interpretability (Before HPO)" if hpo_ran
+                        else "Interpretability (Default Hyperparameters)",
+        }
         self.session.step_timings = [
-            (name, self._step_elapsed[key])
+            (_relabel.get(key, name), self._step_elapsed[key])
             for key, name, _ in STEPS
             if key in self._step_elapsed
         ]

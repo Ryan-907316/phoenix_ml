@@ -2,6 +2,8 @@
 # This module serves as the analysis of the dataset provided before it undergoes any model evaluation.
 # This includes the test/train split, features-target scatter plots, boxplots, and distance correlation. 
 
+import itertools
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -25,7 +27,7 @@ def load_and_preprocess_data(filepath, test_size, split_method="random", target_
     Args:
         filepath (str): Path to CSV.
         test_size (float): Proportion of rows in the test split (0–1).
-        split_method (str): 'random' | 'first' | 'last'.
+        split_method (str): 'random' | 'first' | 'last' | 'stratified' | 'systematic'.
         target_columns (list[str] | None): Columns to treat as targets. If None, uses last column.
         scaler_type (str): Name of the scaler to apply to features (see the scaler lookup).
         random_state (int | None): Seed for the 'random' split method.
@@ -111,8 +113,67 @@ def load_and_preprocess_data(filepath, test_size, split_method="random", target_
         else:
             X_test,  y_test  = X.iloc[-test_count:], y.iloc[-test_count:]
             X_train, y_train = X.iloc[:-test_count], y.iloc[:-test_count]
+    elif split_method.lower() == "systematic":
+        # Classical systematic sampling: a fixed stride (e.g. every 5th row for
+        # test_size=0.2) starting from the middle of the first stride-width "bucket"
+        # rather than literally index 0 -- starting at 0 would force the very first
+        # AND (for a stride that divides the length evenly) very last row into the
+        # test set every time, duplicating exactly what "First"/"Last" already do at
+        # the boundaries instead of giving genuinely even coverage.
+        test_count = int(np.ceil(test_size * len(X)))
+        test_count = min(max(test_count, 1), len(X) - 1)
+        if len(X) < 2:
+            raise ValueError("Dataset needs at least 2 rows to split into train and test sets.")
+        stride = len(X) / test_count
+        positions = stride / 2 + np.arange(test_count) * stride
+        test_idx = np.unique(np.clip(np.floor(positions).astype(int), 0, len(X) - 1))
+        train_idx = np.setdiff1d(np.arange(len(X)), test_idx, assume_unique=True)
+        X_test,  y_test  = X.iloc[test_idx],  y.iloc[test_idx]
+        X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+    elif split_method.lower() == "stratified":
+        # Preserves the target's overall distribution across train/test rather than
+        # leaving it to chance -- valuable on small or skewed datasets, where a plain
+        # random split can accidentally under/over-represent one region of the target
+        # (e.g. missing a dataset's high-value tail from the test set entirely).
+        if y.shape[1] != 1:
+            raise ValueError(
+                "split_method='stratified' requires exactly one target column "
+                f"(got {y.shape[1]}); combining multiple targets into one stratification "
+                f"signal would be arbitrary. Use 'random', 'first', 'last', or 'systematic' "
+                f"instead for multi-target datasets."
+            )
+        if len(X) < 10:
+            raise ValueError(
+                "split_method='stratified' needs at least 10 rows to form meaningful bins."
+            )
+        y_col = y.iloc[:, 0]
+        # Start from up to 10 quantile bins and back off until every bin has at least 2
+        # members (sklearn's stratified split requires that) -- duplicates="drop" can
+        # itself silently reduce the bin count below what was requested (e.g. many
+        # repeated values), so the actual result is always re-checked, never assumed.
+        n_bins = min(10, max(2, len(y) // 10))
+        bins = None
+        while n_bins >= 2:
+            candidate = pd.qcut(y_col, q=n_bins, labels=False, duplicates="drop")
+            counts = candidate.value_counts()
+            if len(counts) >= 2 and counts.min() >= 2:
+                bins = candidate
+                break
+            n_bins -= 1
+        if bins is None:
+            raise ValueError(
+                "split_method='stratified' could not form at least 2 bins with 2+ rows "
+                "each from this target column's distribution -- try 'random' instead."
+            )
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size,
+            random_state=0 if random_state is None else random_state,
+            stratify=bins,
+        )
     else:
-        raise ValueError("split_method must be 'random', 'first', or 'last'.")
+        raise ValueError(
+            "split_method must be 'random', 'first', 'last', 'stratified', or 'systematic'."
+        )
 
     _scalers = {
         "Standard":  StandardScaler,
@@ -135,23 +196,58 @@ def load_and_preprocess_data(filepath, test_size, split_method="random", target_
 
 def plot_target_vs_target(y_train, y_test, target_columns):
     """
-    Scatter plot of first two target variables, colored by train/test.
+    Scatter plot of every pair of target variables, colored by train/test.
+    One subplot per pair (n choose 2 pairs for n targets: 3 targets -> 3 plots,
+    4 -> 6, 5 -> 10, ...), arranged 3 per row and chunked across multiple figures
+    (via _MAX_ROWS_PER_FIG, same convention as plot_features_vs_targets/plot_boxplots)
+    so a large number of targets doesn't produce one unreadably tall figure.
+
+    Returns a list of figures (empty if fewer than 2 targets).
     """
     if len(target_columns) < 2:
         print("Not enough target variables specified to plot graph of target variables.")
-        return
+        return []
 
-    # Scatter plot of target variables
-    target1, target2 = target_columns[:2]  # Use first two for now (maybe add more in later versions?)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.scatter(y_train[target1], y_train[target2], color='black', alpha=0.5, s=10, label=f'Training Data (n={len(y_train)})')
-    ax.scatter(y_test[target1], y_test[target2], color='red', alpha=0.5, s=10, label=f'Testing Data (n={len(y_test)})')
-    ax.set_xlabel(target1)
-    ax.set_ylabel(target2)
-    ax.set_title(f'Train/Test Split: {target1} vs {target2}', fontweight='bold')
-    ax.legend(loc='best')
-    fig.tight_layout()
-    return fig
+    pairs = list(itertools.combinations(target_columns, 2))
+    num_cols = min(len(pairs), 3)
+    subplot_w, subplot_h = 5.0, 4.0
+    pairs_per_fig = _MAX_ROWS_PER_FIG * num_cols
+
+    chunks = [pairs[i:i + pairs_per_fig] for i in range(0, len(pairs), pairs_per_fig)]
+    n_parts = len(chunks)
+    figs = []
+
+    for part_idx, chunk_pairs in enumerate(chunks):
+        chunk_n = len(chunk_pairs)
+        num_rows = (chunk_n + num_cols - 1) // num_cols
+
+        fig, axes = plt.subplots(
+            num_rows, num_cols,
+            figsize=(num_cols * subplot_w, num_rows * subplot_h),
+            squeeze=False,
+        )
+        part_label = f" (Part {part_idx + 1} of {n_parts})" if n_parts > 1 else ""
+        fig.suptitle(f"Target vs Target{part_label}", fontweight="bold")
+
+        for i, (target1, target2) in enumerate(chunk_pairs):
+            ax = axes[i // num_cols][i % num_cols]
+            ax.scatter(y_train[target1], y_train[target2], color='black', alpha=0.5, s=10,
+                      label=f'Training Data (n={len(y_train)})')
+            ax.scatter(y_test[target1], y_test[target2], color='red', alpha=0.5, s=10,
+                      label=f'Testing Data (n={len(y_test)})')
+            ax.set_xlabel(target1)
+            ax.set_ylabel(target2)
+            ax.set_title(f'{target1} vs {target2}', fontweight='bold')
+            ax.legend(loc='best', fontsize=8)
+
+        # Hide any unused trailing subplot cells in the last row.
+        for i in range(chunk_n, num_rows * num_cols):
+            axes[i // num_cols][i % num_cols].axis("off")
+
+        fig.tight_layout()
+        figs.append(fig)
+
+    return figs
 
 # Max subplot rows per figure for wide 3-col layouts (5"×4" subplots, 15" figure width).
 # 4 rows × 4" = 16" → ~558pt display, safely under the 652pt A4 content limit.
@@ -357,6 +453,10 @@ def plot_distance_correlation_matrix(df, title="Distance Correlation Matrix", cm
 
     features = df.columns
     n = len(features)
+    if n == 0:
+        # No feature columns to correlate (e.g. every column became a target) --
+        # nothing to plot, and the font-sizing below divides by n.
+        return pd.DataFrame(), None
     dist_corr_matrix = np.zeros((n, n))
 
     # dcor is symmetric and dcor(x, x) == 1, so only the upper triangle needs computing
@@ -581,7 +681,11 @@ def plot_pca_analysis(X_train_scaled, feature_names, target_columns=None, y_trai
     scores = pca.fit_transform(X_train_scaled)
     ev = pca.explained_variance_ratio_ * 100
     cumev = np.cumsum(ev)
-    n_show = min(n_features, 15)
+    # PCA truncates to min(n_samples, n_features) components -- with a small training
+    # set (e.g. first/last split clamped down to as few as 1 row), ev/cumev can be
+    # shorter than n_features, so n_show must also be capped at len(ev) or the bar/line
+    # plots below get mismatched x/height array lengths and crash.
+    n_show = min(n_features, 15, len(ev))
 
     # ── Scree plot ─────────────────────────────────────────────────────────────
     fig_scree, ax1 = plt.subplots(figsize=(10, 4.5))
@@ -617,7 +721,10 @@ def plot_pca_analysis(X_train_scaled, feature_names, target_columns=None, y_trai
     plt.close(fig_scree)
 
     # ── Biplot(s): one per target variable ────────────────────────────────────
-    if n_features < 2:
+    # Also needs at least 2 *computed* components, not just 2 features -- a training
+    # set with only 1 row (allowed by the first/last split clamp) yields only 1
+    # component regardless of feature count.
+    if n_features < 2 or len(ev) < 2:
         return fig_scree, {}
 
     pc1_var, pc2_var = ev[0], ev[1]
@@ -794,8 +901,10 @@ def run_preprocessing_workflow(
 
     if plot_target_vs_target_enabled:
         print("\nGenerating Target vs Target plot...")
-        fig = plot_target_vs_target(y_train, y_test, target_columns)
-        if fig: figures["Target vs Target"] = fig
+        tvt_figs = plot_target_vs_target(y_train, y_test, target_columns)
+        for part_idx, fig in enumerate(tvt_figs):
+            key = "Target vs Target" if len(tvt_figs) == 1 else f"Target vs Target Part {part_idx + 1}"
+            figures[key] = fig
 
     if plot_features_vs_targets_enabled:
         print("\nGenerating Feature vs Target scatter plots...")

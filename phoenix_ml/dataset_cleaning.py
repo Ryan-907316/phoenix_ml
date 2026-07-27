@@ -88,6 +88,15 @@ def detect_column_type(series: pd.Series) -> str:
     if pd.api.types.is_datetime64_any_dtype(series):
         return TYPE_DATETIME
     if _is_stringlike_dtype(series):
+        # Numeric check first: pd.to_datetime happily parses bare numeric strings
+        # (e.g. "2019") as years, which would otherwise misclassify a genuine
+        # numeric column (a "Year"/"Model Year" feature kept as object dtype by a
+        # stray non-numeric entry or CSV quoting) as Datetime -- and apply_cleaning
+        # would then silently convert it to elapsed-seconds-since-minimum,
+        # destroying its values. A column that's mostly parseable as numbers is
+        # far more likely to actually be numbers than dates.
+        if coerce_numeric(series)[0] is not None:
+            return TYPE_NUMERIC
         # Random, not head(20): a sorted column or one with a placeholder value
         # clustered at the start (e.g. blank/"Unknown" rows before real data
         # begins) would otherwise misclassify off a head-sample that isn't
@@ -100,9 +109,6 @@ def detect_column_type(series: pd.Series) -> str:
             return TYPE_DATETIME
         except Exception:
             pass
-        # Mostly-numeric text column (sensor channel with stray text entries)
-        if coerce_numeric(series)[0] is not None:
-            return TYPE_NUMERIC
         return TYPE_STRING
     if pd.api.types.is_numeric_dtype(series):
         unique_vals = set(series.dropna().unique())
@@ -460,7 +466,16 @@ def auto_classify_columns(df: pd.DataFrame) -> dict:
 
 # ── Row-level issue mask (for data preview colouring) ─────────────────────────
 
-def build_issue_mask(df: pd.DataFrame, col_info: dict) -> dict:
+def build_issue_mask(
+    df: pd.DataFrame, col_info: dict,
+    outlier_method: str = OUTLIER_IQR, outlier_threshold: float = 1.5,
+    stuck_min_run: int = 10,
+) -> dict:
+    """Row-level issue flags for the Data Preview grid. outlier_method/threshold and
+    stuck_min_run default to apply_cleaning's own defaults, but callers should pass the
+    user's actual current Apply-panel settings -- otherwise the preview can highlight
+    (or fail to highlight) rows using a method/threshold Apply won't actually use,
+    genuinely disagreeing with what clicking Apply will do to the data."""
     row_issues: dict[int, set] = {i: set() for i in range(len(df))}
     for col, info in col_info.items():
         if info.get("role") == ROLE_EXCLUDE or col not in df.columns:
@@ -470,12 +485,25 @@ def build_issue_mask(df: pd.DataFrame, col_info: dict) -> dict:
         for i in series[series.isna()].index:
             row_issues[int(i)].add("nan")
         if pd.api.types.is_numeric_dtype(series):
-            # Outliers
-            outlier_mask = detect_outliers_iqr(series)
-            for i in outlier_mask[outlier_mask].index:
-                row_issues[int(i)].add("outlier")
+            # Outliers -- only for the univariate methods (IQR/Z-Score/Percentage),
+            # which operate one column at a time like this preview does. Multivariate
+            # methods (Isolation Forest/LOF/MCD) score all features jointly, so there
+            # is no faithful per-column preview to show for them; "None" means the
+            # user disabled outlier handling entirely. Both cases skip outlier
+            # highlighting rather than silently substituting IQR.
+            if outlier_method == OUTLIER_IQR:
+                outlier_mask = detect_outliers_iqr(series, outlier_threshold)
+            elif outlier_method == OUTLIER_PERCENTILE:
+                outlier_mask = detect_outliers_percentile(series, outlier_threshold)
+            elif outlier_method == OUTLIER_ZSCORE:
+                outlier_mask = detect_outliers_zscore(series, outlier_threshold)
+            else:
+                outlier_mask = None
+            if outlier_mask is not None:
+                for i in outlier_mask[outlier_mask].index:
+                    row_issues[int(i)].add("outlier")
             # Stuck values
-            stuck = detect_stuck_values(series)
+            stuck = detect_stuck_values(series, min_run=stuck_min_run)
             for start, end, _ in stuck["runs"]:
                 for i in range(start, end + 1):
                     if i in row_issues:

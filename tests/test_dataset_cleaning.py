@@ -19,12 +19,15 @@ from phoenix_ml.dataset_cleaning import (
     OUTLIER_ISOLATION_FOREST,
     OUTLIER_LOF,
     OUTLIER_NONE,
+    OUTLIER_ZSCORE,
     ROLE_EXCLUDE,
     ROLE_INPUT,
     ROLE_TIMESTAMP,
     TYPE_DATETIME,
+    TYPE_NUMERIC,
     apply_cleaning,
     auto_classify_columns,
+    build_issue_mask,
     coerce_numeric,
     detect_column_type,
     detect_outliers_multivariate,
@@ -290,6 +293,70 @@ def test_detect_column_type_is_not_fooled_by_a_leading_placeholder_run():
     dates = pd.date_range("2020-01-01", periods=995).strftime("%Y-%m-%d").tolist()
     series = pd.Series(placeholders + dates, dtype=object)
     assert detect_column_type(series) == TYPE_DATETIME
+
+
+def test_detect_column_type_does_not_mistake_a_numeric_year_column_for_datetime():
+    """Regression test: pd.to_datetime happily parses bare 4-digit strings like
+    "2019" as years, so a text-typed "Year"/"Model Year" feature (object dtype
+    from a stray non-numeric entry or CSV quoting) used to get classified as
+    Datetime instead of Numeric. If the user accepted that suggested role,
+    apply_cleaning's timestamp-conversion step would silently rewrite it as
+    elapsed-seconds-since-minimum, destroying a legitimate numeric feature."""
+    series = pd.Series(["2019", "2020", "2021", "2022", "2023"] * 5, dtype=object)
+    assert detect_column_type(series) == TYPE_NUMERIC
+    # A genuine ISO date string column must still be recognised as Datetime —
+    # it isn't numeric-coercible, so the numeric check correctly falls through.
+    dates = pd.Series(["2023-01-15", "2023-02-20", "2023-03-01"] * 5, dtype=object)
+    assert detect_column_type(dates) == TYPE_DATETIME
+
+
+def _col_info_for(df, role=ROLE_INPUT, dtype=TYPE_NUMERIC):
+    return {col: {"role": role, "type": dtype} for col in df.columns}
+
+
+def test_build_issue_mask_stuck_threshold_matches_apply_cleanings_default():
+    """Regression test: build_issue_mask (the Data Preview grid's row-highlighting
+    function) used to call detect_stuck_values with no min_run argument, silently
+    falling back to that function's own default of 5 -- while auto_classify_columns
+    and apply_cleaning's own default both use 10. A run of 5-9 identical values was
+    highlighted as "stuck" in the preview despite not actually being flagged by
+    Apply with default settings, a genuine disagreement between what the preview
+    shows and what Apply does."""
+    # A run of exactly 7 identical values: "stuck" under the old default (5) but
+    # not under the correct default (10) that apply_cleaning itself uses.
+    df = pd.DataFrame({"x": [1.0, 2.0] + [5.0] * 7 + [9.0, 10.0]})
+    mask_default = build_issue_mask(df, _col_info_for(df))
+    stuck_rows = {i for i, issues in mask_default.items() if "stuck" in issues}
+    assert stuck_rows == set()
+
+    # But raising min_run to catch it, or explicitly matching the old (wrong) default
+    # of 5, does surface it -- confirming stuck detection is genuinely being driven
+    # by the passed-in threshold, not silently ignoring it.
+    mask_low = build_issue_mask(df, _col_info_for(df), stuck_min_run=5)
+    stuck_rows_low = {i for i, issues in mask_low.items() if "stuck" in issues}
+    assert stuck_rows_low == {2, 3, 4, 5, 6, 7, 8}
+
+
+def test_build_issue_mask_outlier_method_matches_the_selected_method():
+    """Regression test: build_issue_mask used to always call detect_outliers_iqr
+    regardless of which outlier method the user actually selected in the Apply
+    panel -- so a row Apply would flag under Z-Score/Percentage could go
+    unhighlighted in the preview, and vice versa. Now it must dispatch on the
+    passed-in method, matching apply_cleaning's own per-column dispatch."""
+    # A single mild outlier that IQR (threshold 1.5) flags but a permissive
+    # Z-Score (threshold 5) would not.
+    df = pd.DataFrame({"x": [10.0] * 20 + [17.0]})
+    mask_iqr = build_issue_mask(df, _col_info_for(df), outlier_method=OUTLIER_IQR, outlier_threshold=1.5)
+    mask_z = build_issue_mask(df, _col_info_for(df), outlier_method=OUTLIER_ZSCORE, outlier_threshold=5.0)
+    iqr_outliers = {i for i, issues in mask_iqr.items() if "outlier" in issues}
+    z_outliers = {i for i, issues in mask_z.items() if "outlier" in issues}
+    assert iqr_outliers == {20}
+    assert z_outliers == set()
+
+    # "None" must skip outlier highlighting entirely rather than silently
+    # substituting IQR.
+    mask_none = build_issue_mask(df, _col_info_for(df), outlier_method=OUTLIER_NONE)
+    assert {i for i, issues in mask_none.items() if "outlier" in issues} == set()
 
 
 def test_apply_cleaning_warns_when_missing_action_none_leaves_nans_behind():

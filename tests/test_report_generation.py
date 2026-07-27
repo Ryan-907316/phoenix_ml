@@ -10,9 +10,15 @@ import tempfile
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
 from phoenix_ml.interpretability import FailedPlot
-from phoenix_ml.report_generation import add_interpretability_section, init_pdf_report
+from phoenix_ml.report_generation import (
+    add_interpretability_section,
+    add_postprocessing_section,
+    init_pdf_report,
+)
 
 
 def _heading_texts(elements, style_names):
@@ -501,3 +507,32 @@ def _report_styles():
         font_name="Helvetica", font_size=10, title_font_size=20, heading_font_size=14,
     )
     return styles
+
+
+def test_cv_table_shows_na_not_the_literal_string_nan_for_std_deviation(tmp_path):
+    """Regression test for the Predicted R^2 (PRESS) addition: its CV summary row
+    has a NaN Std Deviation (there's no per-fold average to take), which used to
+    render as the literal text "nan" in the PDF table instead of a clean "N/A"."""
+    from reportlab.platypus import Table
+
+    doc, elements, styles, filepath, summary_index = init_pdf_report(
+        filename="test.pdf", output_dir=str(tmp_path), title="Test", font_name="Helvetica",
+        font_size=10, title_font_size=20, heading_font_size=14,
+    )
+    cv_df = pd.DataFrame([
+        {"Target Variable": "Speed",  "CV Method": "K-Fold", "CV Parameters": {"n_splits": 5},
+         "Mean Score": 0.87, "Std Deviation": 0.05},
+        {"Target Variable": "Torque", "CV Method": "LOO",    "CV Parameters": {},
+         "Mean Score": 0.91, "Std Deviation": np.nan},
+    ])
+    postprocessing_results = {"cv_summary_df": cv_df, "scoring_metric": "PRED_R^2"}
+
+    add_postprocessing_section(elements, styles, postprocessing_results,
+                               image_output_dir=str(tmp_path))
+
+    tables = [el for el in elements if isinstance(el, Table)]
+    cv_table = next(t for t in tables if "Std Deviation" in
+                     [getattr(c, "text", c) for c in t._cellvalues[0]])
+    rendered_std_cells = [getattr(row[4], "text", row[4]) for row in cv_table._cellvalues[1:]]
+    assert rendered_std_cells == ["0.0500", "N/A"]
+    assert "nan" not in rendered_std_cells[1].lower()

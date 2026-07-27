@@ -179,6 +179,61 @@ def test_workflow_is_reproducible_with_same_seed(tmp_path, synthetic_dataset_csv
 # construction. These four tests each isolate one minimal configuration
 # dimension that no existing test covers explicitly.
 
+def test_stratified_and_systematic_split_methods_run_end_to_end(tmp_path, synthetic_dataset_csv):
+    """New split methods (added alongside random/first/last) exercised through
+    the full standalone run_workflow() entry point, not just the unit-level
+    load_and_preprocess_data() tests -- confirms the seed-derivation wiring for
+    "stratified" and the report/metadata plumbing for both work end to end."""
+    for method in ("Stratified", "Systematic"):
+        output_dir = tmp_path / f"output_{method.lower()}"
+        result = run_workflow(
+            dataset_path=str(synthetic_dataset_csv),
+            output_dir=str(output_dir),
+            selected_models=["Random Forest Regressor"],
+            targets=["Target"],
+            split_method=method,
+            perform_hpo=False,
+            perform_uq=False,
+            perform_cv=False,
+            perform_interpretability=False,
+            random_seed=0,
+        )
+        assert os.path.isfile(result["pdf"])
+
+
+def test_standalone_workflow_relabels_before_hpo_when_hpo_is_off(tmp_path, synthetic_dataset_csv):
+    """Same fix as workflow_steps.py's session path, applied to the standalone
+    run_workflow() entry point: perform_hpo is known up front here (a single
+    function call with a fixed config), so the label is correct from the source
+    all the way through -- both the section heading and the underlying UQ
+    table's own "Stage" column."""
+    from unittest.mock import patch
+    from phoenix_ml import workflow as wf
+
+    with patch.object(
+        wf, "handle_uq_reporting_section", wraps=wf.handle_uq_reporting_section,
+    ) as spy:
+        run_workflow(
+            dataset_path=str(synthetic_dataset_csv),
+            output_dir=str(tmp_path / "output"),
+            selected_models=["Random Forest Regressor"],
+            targets=["Target"],
+            perform_hpo=False,
+            perform_uq=True,
+            perform_cv=False,
+            perform_interpretability=False,
+            uq_settings=dict(
+                uq_method="Conformal", n_bootstrap=2, confidence_interval=95,
+                calibration_frac=0.1, subsample_test_size=16, n_jobs=1,
+                include_gp_posterior=False, calibration_enabled=True,
+            ),
+            random_seed=0,
+        )
+        assert spy.call_args.args[2] == "Default Hyperparameters"
+        uq_df_arg = spy.call_args.args[0]
+        assert set(uq_df_arg["Stage"].unique()) == {"Default Hyperparameters"}
+
+
 def test_no_physics_run_records_perl_disabled_in_metadata(tmp_path, synthetic_dataset_csv):
     """workflow.py's standalone entry point never supports PERL — metadata.json
     must consistently record that (perl_enabled: False, no reconstruction_map)
@@ -204,9 +259,9 @@ def test_no_physics_run_records_perl_disabled_in_metadata(tmp_path, synthetic_da
 
 
 def test_single_target_run_skips_target_vs_target_plot_without_crashing(tmp_path, synthetic_dataset_csv):
-    """plot_target_vs_target requires >= 2 targets and returns None otherwise
-    (see data_preprocessing.py) — with the single-target dataset every other
-    smoke test also uses, that figure must be cleanly absent from the report
+    """plot_target_vs_target requires >= 2 targets and returns an empty list
+    otherwise (see data_preprocessing.py) — with the single-target dataset every
+    other smoke test also uses, that figure must be cleanly absent from the report
     images, not attempted and not a crash."""
     output_dir = tmp_path / "output"
     result = run_workflow(

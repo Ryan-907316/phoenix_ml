@@ -86,6 +86,32 @@ def test_function_arity_is_enforced():
         parse_expression("out = atan2(x)")       # 2-arg func given 1
 
 
+def test_new_2arg_functions_are_accepted_and_evaluate_correctly():
+    """hypot/mod/min/max were added alongside atan2 as 2-argument functions
+    (all zero-new-dependency numpy functions) — same whitelist entry point,
+    same arity enforcement, so verify both parsing and numeric evaluation."""
+    for expression in ["out = hypot(x, y)", "out = mod(x, y)",
+                       "out = min(x, y)", "out = max(x, y)"]:
+        lhs, tree, name_map = parse_expression(expression)
+        assert lhs == "out"
+
+    df = pd.DataFrame({"x": [3.0, 5.0], "y": [4.0, 2.0]})
+    result, _ = apply_expressions(df, ["out = hypot(x, y)"])
+    assert list(result["out"]) == [5.0, np.sqrt(29)]
+
+    result, _ = apply_expressions(df, ["out = mod(x, y)"])
+    assert list(result["out"]) == list(np.mod([3.0, 5.0], [4.0, 2.0]))
+
+    result, _ = apply_expressions(df, ["out = min(x, y)"])
+    assert list(result["out"]) == [3.0, 2.0]
+
+    result, _ = apply_expressions(df, ["out = max(x, y)"])
+    assert list(result["out"]) == [4.0, 5.0]
+
+    with pytest.raises(ExpressionError):
+        parse_expression("out = hypot(x)")       # 2-arg func given 1
+
+
 def test_huge_literal_exponent_is_rejected():
     """Regression test for a real risk: `2 ** 999999999` between bare
     constants has no magnitude bound — int**int is arbitrary precision, so

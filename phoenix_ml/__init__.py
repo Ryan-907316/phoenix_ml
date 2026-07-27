@@ -26,7 +26,7 @@ Run the full workflow from Python::
     )
 """
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 import os
 import warnings

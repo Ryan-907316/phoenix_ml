@@ -105,7 +105,7 @@ Make sure to run `phoenix-ml --get-examples` first (or clone the repository) so 
 
 ## Future Work
 
-Items from earlier versions of this list that have since shipped (ALE, LOFO importance, Morris/Sobol sensitivity analysis, per-method UI toggles, monotonicity constraints, extended regression diagnostics, SHAP waterfall plots, calibration scoring, multivariate outlier detection, expanded metrics, feature-selection flags) now appear under Features above: see the [CHANGELOG](CHANGELOG.md) for when each arrived.
+Items from earlier versions of this list that have since shipped (ALE, LOFO importance, Morris/Sobol sensitivity analysis, per-method UI toggles, monotonicity constraints, extended regression diagnostics, SHAP waterfall plots, calibration scoring, multivariate outlier detection, expanded metrics, feature-selection flags, the PRESS statistic/Predicted R², auto-generated model cards) now appear under Features above: see the [CHANGELOG](CHANGELOG.md) for when each arrived.
 
 ### Short-term
 - **Advanced conformal prediction**: Jackknife+, CV+, and conformalized quantile regression (CQR) via MAPIE, extending the current split-conformal implementation to provide adaptive interval widths for heteroscedastic data and stronger distribution-free coverage guarantees.
@@ -113,9 +113,7 @@ Items from earlier versions of this list that have since shipped (ALE, LOFO impo
 - **Multi-objective HPO**: Optimising across multiple metrics simultaneously (predictive performance vs. model complexity vs. training time) using Pareto-optimal selection, turning the existing post-hoc Pareto analysis into an active multi-objective optimiser via Optuna's NSGA-II/III samplers.
 - **Advanced model selection**: More regression models, and the ability to choose which hyperparameters to optimise and customise their search spaces directly from the UI.
 - **Additional residual transformations**: Lambert W × Gaussian (Goerg 2011) and Tukey's g-and-h transforms alongside the current Yeo-Johnson/Arcsinh pair, as both correct skewness and excess kurtosis independently, but need hand-rolled implementations (no scipy/sklearn support).
-- **PRESS statistic and predicted R²**: rounding out the extended regression diagnostics already in place.
 - **User documentation**: The creation of detailed user documentation to add existing ease-of-use, and explains everything they need to know in detail, including how to use phoenix_ml, how to use every setting in the UI, instructions on how to interpret information from the report, and step-by-step examples and tutorials.
-- **Model documentation**: Auto-generated model cards from the existing metadata JSON, structured to document intended use, data provenance, metrics, and known limitations.
 
 ### Medium-term
 - **Symbolic regression / equation discovery**: Integration of gplearn (pure Python, sklearn-compatible) as an equation discovery mode allowing users to find closed-form governing equations directly from data, with the discovered expression optionally fed back into the existing PERL expression mode. PySR (higher performance, Julia backend) as an optional advanced alternative.

@@ -30,6 +30,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import cross_val_score
 from sklearn.inspection import permutation_importance as _permutation_importance
+from sklearn.base import clone
 import ast
 import math
 
@@ -147,6 +148,48 @@ def _build_cv(cv_method: str, cv_args: dict, n_train: int | None = None):
 # LOFO importance now actually compute the metric requested, not a silent substitute.
 _CUSTOM_SCORER_METRICS = ("Q^2", "ADJUSTED R^2", "NRMSE", "MAPE", "KGE")
 
+# PRESS (Predicted Residual Sum of Squares) / Predicted R^2: unlike every metric
+# above, this is not a per-fold score to average. The textbook closed-form PRESS
+# formula (via the OLS hat/leverage matrix) doesn't apply to any model this package
+# ships -- none are OLS-family -- so it's computed the general way: pool every
+# fold's held-out residuals first (across whichever CV method is selected, not
+# just LOO), then compare the pooled sum of squares against the total sum of
+# squares of the whole target once. This also sidesteps a real gap: averaging
+# per-fold R^2-style scores the normal way is mathematically undefined for LOO's
+# single-point folds (sklearn silently returns NaN for each fold) -- see
+# tests/ISSUES.md. Only meaningful in a genuine cross-validation context (repeated
+# refitting): Report Metrics and HPO evaluate a single train/test split, so it
+# isn't offered there. Permutation/LOFO Importance evaluate on a single held-out
+# set too, so they fall back to R^2 with a logged warning instead of silently
+# substituting it, matching this module's existing no-silent-substitution rule.
+PRED_R2_METRIC = "PRED_R^2"
+
+
+def _press_predicted_r2(model, X_train, y_target, cv):
+    """PRESS-based Predicted R^2: pool squared out-of-fold residuals across every
+    split the given CV splitter produces, then compare against the total sum of
+    squares of the full target. See PRED_R2_METRIC's module comment for why this
+    needs its own aggregation instead of cross_val_score's per-fold averaging.
+    """
+    y_true_all, y_pred_all = [], []
+    for train_idx, test_idx in cv.split(X_train):
+        m = clone(model)
+        X_tr = X_train.iloc[train_idx] if hasattr(X_train, "iloc") else X_train[train_idx]
+        X_te = X_train.iloc[test_idx]  if hasattr(X_train, "iloc") else X_train[test_idx]
+        y_tr = y_target.iloc[train_idx] if hasattr(y_target, "iloc") else y_target[train_idx]
+        y_te = y_target.iloc[test_idx]  if hasattr(y_target, "iloc") else y_target[test_idx]
+        m.fit(X_tr, y_tr)
+        y_true_all.append(np.asarray(y_te))
+        y_pred_all.append(np.asarray(m.predict(X_te)))
+
+    y_true_all = np.concatenate(y_true_all)
+    y_pred_all = np.concatenate(y_pred_all)
+    press = float(np.sum((y_true_all - y_pred_all) ** 2))
+
+    y_full = np.asarray(y_target)
+    sst = float(np.sum((y_full - y_full.mean()) ** 2))
+    return (1 - press / sst) if sst > 0 else float("nan")
+
 
 def _custom_metric_scorer(scoring_metric):
     """Return a sklearn-compatible scorer callable (estimator, X, y) -> float,
@@ -156,7 +199,7 @@ def _custom_metric_scorer(scoring_metric):
         n, p = X.shape
         if scoring_metric == "Q^2":
             denom = np.sum((y - np.mean(y))**2)
-            return 1 - np.sum((y - y_pred)**2) / denom if denom > 0 else 0.0
+            return 1 - np.sum((y - y_pred)**2) / denom if denom > 0 else float("nan")
         elif scoring_metric == "ADJUSTED R^2":
             if n <= p + 1:
                 return float("nan")
@@ -181,6 +224,40 @@ def _custom_metric_scorer(scoring_metric):
 
 def perform_cross_validation_with_summary(model, X_train, y_train, target_var, cv_method, cv_args, scoring_metric, verbose: bool = False):
     cv = _build_cv(cv_method, cv_args, n_train=len(X_train))
+
+    # R^2/Adjusted R^2/KGE/Q^2 are mathematically undefined (or, for Q^2's
+    # zero-variance guard, silently misleading -- it falls back to a fabricated
+    # 0.0 instead of NaN) for a fold with fewer than 2 test samples. This isn't
+    # just a LOO problem: K-Fold/RepeatedKFold/ShuffleSplit can produce a
+    # single-sample fold too if n_splits/test_size is aggressive relative to
+    # n_train, and sklearn's remainder distribution means the smallest fold
+    # isn't always the first one checked -- so every fold is checked, not just
+    # one. Fail clearly here instead of silently returning NaN/0.0 with no
+    # indication anything went wrong (see tests/ISSUES.md).
+    if scoring_metric in ("R^2", "ADJUSTED R^2", "KGE", "Q^2"):
+        min_fold_size = min(len(test_idx) for _, test_idx in cv.split(np.zeros(len(X_train))))
+        if min_fold_size < 2:
+            raise ValueError(
+                f"{scoring_metric} cannot be computed with {cv_method} using these "
+                f"parameters: at least one fold has only {min_fold_size} test sample(s), "
+                f"and {scoring_metric} is undefined (or, for Q^2, silently misleading) with "
+                f"fewer than 2. Use {PRED_R2_METRIC} instead -- it's designed for exactly "
+                "this case -- or choose CV parameters that keep every fold's test set at 2 "
+                "or more samples."
+            )
+
+    if scoring_metric == PRED_R2_METRIC:
+        pred_r2 = _press_predicted_r2(model, X_train, y_train[target_var], cv)
+        return {
+            "method": cv_method,
+            "params": cv_args,
+            "mean_score": pred_r2,
+            # Not an average of independent per-fold scores -- there is only one
+            # pooled Predicted R^2 value across all folds -- so no std dev applies.
+            "std_dev": float("nan"),
+            "scores": np.array([pred_r2]),
+        }
+
     scoring_map = {
         "MSE": "neg_mean_squared_error",
         "MAE": "neg_mean_absolute_error",
@@ -218,7 +295,11 @@ def create_cv_summary_df(cv_summary, scoring_metric):
 
     # Same tabulate grid as every other console table (Model Performance
     # Summary, UQ, transformations) instead of loose per-target prose lines.
-    print(f"\nCross-Validation Summary (Mean Score = mean {scoring_metric}):")
+    if scoring_metric == PRED_R2_METRIC:
+        # Not an average of per-fold scores -- say so plainly instead of "mean".
+        print(f"\nCross-Validation Summary (Score = {scoring_metric}, pooled across all folds):")
+    else:
+        print(f"\nCross-Validation Summary (Mean Score = mean {scoring_metric}):")
     log_table(df, max_col_width=48)
 
     return df
@@ -363,7 +444,14 @@ def plot_influential_points_per_target(best_models, X_train, X_test, y_train, y_
         stud_res  = influence.resid_studentized_external
 
         cooks_thresh   = 4.0 / n
-        dffits_thresh  = 2.0 * np.sqrt(p / n)
+        # Standard cutoff (Belsley/Kuh/Welsch; NIST Engineering Statistics Handbook
+        # 4.4.4.3) is 2*sqrt(k/n) where k is the number of parameters INCLUDING the
+        # intercept -- the same k used for the leverage cutoff right below. p here is
+        # X_arr.shape[1], i.e. feature count EXCLUDING the intercept sm.add_constant
+        # adds, so both thresholds must use (p + 1), not just leverage's. Previously
+        # DFFITS used p alone, undercounting by one parameter relative to leverage in
+        # the same function and over-flagging points by a factor of sqrt(p/(p+1)).
+        dffits_thresh  = 2.0 * np.sqrt((p + 1) / n)
         lev_thresh     = 2.0 * (p + 1) / n
 
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
@@ -876,7 +964,15 @@ def compute_permutation_importance(best_models, X_train, X_test, y_train, y_test
         "MSE":   "neg_mean_squared_error",
         "MAE":   "neg_mean_absolute_error",
     }
-    if scoring_metric in _scorer_map:
+    if scoring_metric == PRED_R2_METRIC:
+        # PRESS/Predicted R^2 needs a genuine CV loop (repeated refitting);
+        # permutation importance evaluates on one fixed held-out set, so there's no
+        # fold structure to pool residuals across here. Fall back loudly, not silently.
+        print(f"  [WARN] Permutation Importance does not support {PRED_R2_METRIC} "
+              "(it requires cross-validation folds, not a single held-out set) - using R^2 instead.")
+        scoring_metric = "R^2"
+        scorer = "r2"
+    elif scoring_metric in _scorer_map:
         scorer = _scorer_map[scoring_metric]
     elif scoring_metric in _CUSTOM_SCORER_METRICS:
         # These used to silently fall back to R^2 with no indication anywhere
@@ -974,7 +1070,15 @@ def compute_lofo_importance(best_models, X_train, X_test, y_train, y_test,
         "MSE":   "neg_mean_squared_error",
         "MAE":   "neg_mean_absolute_error",
     }
-    if scoring_metric in _scorer_map:
+    if scoring_metric == PRED_R2_METRIC:
+        # PRESS/Predicted R^2 needs a genuine CV loop (repeated refitting); LOFO
+        # evaluates on one fixed held-out set, so there's no fold structure to pool
+        # residuals across here. Fall back loudly, not silently.
+        print(f"  [WARN] LOFO Importance does not support {PRED_R2_METRIC} "
+              "(it requires cross-validation folds, not a single held-out set) - using R^2 instead.")
+        scoring_metric = "R^2"
+        scorer = get_scorer("r2")
+    elif scoring_metric in _scorer_map:
         scorer = get_scorer(_scorer_map[scoring_metric])
     elif scoring_metric in _CUSTOM_SCORER_METRICS:
         # These used to silently fall back to R^2 with no indication anywhere
@@ -1077,7 +1181,7 @@ def compute_extended_diagnostics(best_models, X_train, X_test, y_train, y_test,
     on the test-set residuals. Returns a DataFrame with one row per target.
 
     Metrics:
-      - DFFITS Flagged: observations with |DFFITS| > 2*sqrt(p/n)
+      - DFFITS Flagged: observations with |DFFITS| > 2*sqrt((p+1)/n)
       - High Leverage: observations with h_ii > 2*(p+1)/n
       - Outliers (|t|>3): externally studentised residuals with |t| > 3
       - Breusch-Pagan: heteroscedasticity test (H0: homoscedastic)
@@ -1107,9 +1211,11 @@ def compute_extended_diagnostics(best_models, X_train, X_test, y_train, y_test,
         cooks_thresh = 4.0 / n
         pct_cooks = round(100.0 * float(np.sum(cooks_d > cooks_thresh)) / n, 1)
 
-        # Influence measures (as % of test set size)
+        # Influence measures (as % of test set size). Same (p + 1) convention as the
+        # leverage threshold right below -- see _fit_and_get_influence's plotting
+        # sibling for the full derivation.
         dffits_vals = influence.dffits[0]
-        dffits_thresh = 2.0 * np.sqrt(p / n)
+        dffits_thresh = 2.0 * np.sqrt((p + 1) / n)
         pct_dffits = round(100.0 * float(np.sum(np.abs(dffits_vals) > dffits_thresh)) / n, 1)
 
         leverage = influence.hat_matrix_diag

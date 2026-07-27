@@ -345,8 +345,14 @@ def plot_uncertainty_results_for_model(
     on the right of each row so everything stays in one figure per model.
     """
     base_methods = ["Bootstrapping", "Conformal"] if uq_method == "Both" else [uq_method]
-    first_res = next(iter(results_by_target.values()), {})
-    methods = base_methods + (["GP Posterior"] if "GP Posterior" in first_res else [])
+    # GP Posterior can fail on a per-target basis (e.g. a singular kernel on one
+    # target's data) without failing on others -- check across ALL targets, not just
+    # the first, or a target where it succeeded could be silently dropped (if it
+    # failed on the first target) or crash the whole plot (if it failed on a later
+    # one, since that target's result dict would then lack the "GP Posterior" key
+    # this column layout assumes every row has).
+    any_gp = any("GP Posterior" in r for r in results_by_target.values())
+    methods = base_methods + (["GP Posterior"] if any_gp else [])
     num_targets = len(results_by_target)
 
     has_calib = (
@@ -375,7 +381,17 @@ def plot_uncertainty_results_for_model(
 
         for col_idx, method in enumerate(methods):
             ax = axes[row_idx][col_idx]
-            res = result_data[method]
+            res = result_data.get(method)
+            if res is None:
+                # This method was computed for at least one target (or it wouldn't be
+                # in `methods`) but failed for this specific one -- e.g. GP Posterior
+                # hitting a singular kernel on this target's data. Leave the panel
+                # blank with a note instead of crashing the whole model's plot grid.
+                ax.axis("off")
+                ax.text(0.5, 0.5, f"{method} unavailable\nfor {target_var}",
+                        ha="center", va="center", fontsize=10, color="grey",
+                        transform=ax.transAxes)
+                continue
             mean_pred, lb, ub = res["mean"], res["lower"], res["upper"]
             x_range = range(len(mean_pred))
             if method == "Bootstrapping":
@@ -464,8 +480,9 @@ def run_uncertainty_quantification(
         # entry is either a single shared estimator ({model_name: instance} — used
         # before HPO, when every target reuses the same default-hyperparameter model and
         # refits per target below) or a per-target dict ({target: instance} — used after
-        # HPO via get_all_models_tuned_per_target, where each target already has its own
-        # correctly-tuned instance and no further constraint application is needed).
+        # HPO via get_all_models_tuned_per_target, which applies each target's monotonic
+        # constraint itself before returning the tuned instance, so no further
+        # constraint application is needed here).
         per_target_instances = entry if isinstance(entry, dict) else None
         model = None if per_target_instances is not None else entry
         tqdm.write(f"\n=== UQ ({stage_label}): {model_name} ===")

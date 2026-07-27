@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phoenix_ml_workflow"
-version = "1.2.1"
+version = "1.2.2"
 authors = [
     {name = "Ryan Cheung", email = "cheungkh@lancaster.ac.uk"}
 ]
@@ -42,7 +42,16 @@ dependencies = [
     # release with no warning, floors-only having let them in silently. Caps
     # sit one major version above the newest version this package has actually
     # been tested against; bump them only after verifying the next major works.
-    "numpy >= 1.26.4, < 3",
+    #
+    # numpy is capped tighter than the rest of this stack (< 2.5, not < 3):
+    # dcor and shap both pull in numba unconstrained, and numba's own latest
+    # release declares "numpy<2.5" -- a resolver free to pick any numpy under
+    # 3 can pick one numba can't satisfy (numpy 2.5.0 shipped after this cap
+    # was last reviewed), backtracking all the way to a numba/llvmlite old
+    # enough to hard-fail on the Python versions this package supports.
+    # Confirmed via a real "pip install" resolution, not just reasoning about
+    # metadata. Loosen only after numba ships a release that supports it.
+    "numpy >= 1.26.4, < 2.5",
     "pandas >= 2.2.3, < 4",
     "scipy >= 1.14.1, < 2",
     "scikit-learn >= 1.5.2, < 2",

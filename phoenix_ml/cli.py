@@ -41,7 +41,7 @@ def _bold_letters(text: str, letters: str, case_insensitive: bool = True) -> str
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="phoenix-ml",
-        description="Phoenix ML — Physics-Enhanced Machine Learning workflow.",
+        description="phoenix_ml: Physics-Enhanced Machine Learning workflow.",
         add_help=True,
     )
     parser.add_argument(
@@ -68,7 +68,7 @@ def main() -> None:
 
     print()
     print("=" * 70)
-    desc = ("  phoenix_ml  --  A Physics and Hybrid Optimised ENgine for "
+    desc = ("  phoenix_ml:  A Physics and Hybrid Optimised ENgine for "
             "Interpretability and eXplainability for Machine Learning")
     print(_bold_letters(desc, "phoenix_ml"))
     print("=" * 70)

@@ -2,6 +2,7 @@
 # This is where the user is free to add, remove, or modify regression models and their hyperparameter search spaces
 
 from sklearn.svm import SVR
+from sklearn.linear_model import ElasticNet
 from sklearn.ensemble import (
     RandomForestRegressor, BaggingRegressor, ExtraTreesRegressor,
     HistGradientBoostingRegressor
@@ -25,6 +26,7 @@ models_dict = {
     "MLP Regressor": MLPRegressor(max_iter=1000, verbose=False),
     "KNeighbors Regressor": KNeighborsRegressor(),
     "Extra Trees Regressor": ExtraTreesRegressor(verbose=0),
+    "ElasticNet": ElasticNet(),
 }
 
 # Define hyperparameter search spaces
@@ -86,6 +88,10 @@ param_spaces = {
         "n_estimators": {"type": "int", "bounds": (50, 500)},
         "max_depth": {"type": "int", "bounds": (10, 100)},
         "min_samples_split": {"type": "int", "bounds": (2, 20)},
+    },
+    "ElasticNet": {
+        "alpha": {"type": "loguniform", "bounds": (1e-4, 1e1)},
+        "l1_ratio": {"type": "uniform", "bounds": (0.0, 1.0)},
     },
 }
 
